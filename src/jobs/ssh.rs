@@ -394,6 +394,7 @@ pub fn control_path_for_riding(_target: &SshTarget) -> Option<std::path::PathBuf
     None
 }
 
+#[cfg(unix)]
 const MASTER_PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Try to (re)establish the master WITHOUT a terminal.
