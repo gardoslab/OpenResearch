@@ -1,126 +1,110 @@
 <div align="center">
 
-<h1><img src=".github/readme-assets/openresearch.svg" alt="" width="36" /> OpenResearch</h1>
+<h1><img src=".github/readme-assets/openresearch.svg" alt="" width="36" /> OpenResearch (BU fork)</h1>
 
-**The local-first workspace for research agents and autoresearch.**
-
-<p>Turn <img src=".github/readme-assets/claude.svg" alt="" width="16" height="16" align="texttop" /> Claude Code,
-<img src=".github/readme-assets/codex.svg" alt="" width="16" height="16" align="texttop" /> Codex,
-<img src=".github/readme-assets/opencode.svg" alt="" width="16" height="16" align="texttop" /> OpenCode,
-<img src=".github/readme-assets/cursor.svg" alt="" width="16" height="16" align="texttop" /> Cursor, or Google Antigravity into research agents that can review
-literature, develop hypotheses, run experiments, and produce research artifacts.</p>
-
-<p>
-<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-macos-dark.svg"><img src=".github/readme-assets/download-macos.svg" alt="Download OpenResearch for macOS" width="220" height="44" /></picture></a>
-<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/openresearch-cli-x86_64-pc-windows-msvc.zip"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="Download OpenResearch for Windows (Beta)" width="220" height="44" /></picture></a>
-<a href="#get-started"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/install-linux-centered-dark.svg"><img src=".github/readme-assets/install-linux-centered.svg" alt="Install OpenResearch for Linux" width="220" height="44" /></picture></a>
-</p>
-
-<p>
-<a href="https://openresearch.sh/docs"><img src=".github/readme-assets/action-documentation.svg" alt="Documentation" width="132" height="24" /></a><img src=".github/readme-assets/action-separator.svg" alt=" · " width="12" height="24" />
-<a href="https://github.com/alphaXiv/OpenResearch/releases"><img src=".github/readme-assets/action-releases.svg" alt="Releases" width="78" height="24" /></a>
-</p>
-
-<p><sub>macOS 11+ · Windows beta requires <a href="docs/windows.md">Git for Windows</a></sub></p>
-
-<p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: #1 Repository of the Day" width="250" height="55" /></a>
-<a href="https://trendshift.io/repositories/89363?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-89363" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/89363/daily?language=Rust" alt="alphaXiv/OpenResearch | Trendshift" width="250" height="55" /></a></p>
+**A local-first workspace for research agents and autoresearch.**
 
 </div>
 
-## Get started
+This is a fork of [alphaXiv/OpenResearch](https://github.com/alphaXiv/OpenResearch),
+modified for our own research at BU. We keep it close to upstream and merge
+upstream changes in regularly. Our additions so far include an SGE backend for
+the SCC, job labels and status fixes for cluster runs, automatic continue after
+usage limits, `@file` mentions in chat, Slack notifications, and in-app updates
+from this fork's releases.
 
-Install the CLI on macOS or Linux, then launch OpenResearch:
+Releases are published at
+[gardoslab/OpenResearch](https://github.com/gardoslab/OpenResearch/releases).
+Upstream's docs at [openresearch.sh/docs](https://openresearch.sh/docs) still
+apply to most of the app.
+
+## Ways to run it
+
+**1. Install a release (Linux, macOS, Windows).** This is the normal way, and
+the only one where `orx update` and the dashboard's Update button work.
 
 ```sh
-curl -LsSf https://openresearch.sh/install.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/gardoslab/OpenResearch/releases/latest/download/openresearch-cli-installer.sh | INSTALLER_DOWNLOAD_URL=https://github.com/gardoslab/OpenResearch/releases/latest/download sh
 orx up
 ```
 
-On Windows, use the beta download above after installing
+The `INSTALLER_DOWNLOAD_URL` part is only needed for releases up to 0.2.9,
+whose installer still points at upstream. Windows needs
 [Git for Windows](docs/windows.md).
 
-`orx up` opens the local dashboard at `http://127.0.0.1:4791`.
+`orx up` opens the dashboard at `http://127.0.0.1:4791`. To update later, run
+`orx update` or use the Update button in Settings.
 
-[Connect a local model](docs/local-models.md) to use LM Studio, oMLX, Ollama,
-or a custom endpoint with OpenCode.
+**2. Run from source.** Needs Rust and, on Linux, `build-essential` and
+`pkg-config`. The built dashboard is committed in `ui/dist`, so Node is not
+required.
 
-Create an account at [openresearch.sh](https://openresearch.sh) to receive email
-updates and use managed OpenResearch compute.
+```sh
+cargo run -- up            # run in place
+cargo install --path . --locked   # or install orx into ~/.cargo/bin
+```
 
-## Built for research agents
+A source build cannot update itself. Pull and rebuild instead.
 
-| | OpenResearch gives you |
-|---|---|
-| **Parallel exploration** | Give each research direction an independent agent session and isolated git worktree. |
-| **Reproducible experiments** | Track variants in a git-native experiment tree; every run receives an immutable archive of its recorded commit. |
-| **Evidence in context** | Keep logs, diffs, files, results, and artifacts tied to the work that produced them. |
-| **Your choice of agent** | Use Claude Code, Codex, OpenCode, Cursor, or Google Antigravity, with the harness and model selected per session. |
-| **Your choice of compute** | Run locally, on your own infrastructure, or with managed OpenResearch compute. |
-| **Local ownership** | Keep projects, conversations, experiments, runs, logs, code, and artifacts on your machine. |
+**3. Development instance.** Runs a separate copy with its own ports, data and
+processes, so it never touches your real projects. Needs Node, pnpm and
+[`just`](https://github.com/casey/just).
 
-### Autoresearch
+```sh
+just up      # start (or reuse) a dev slot on a copy of your database
+just status
+just down
+```
 
-OpenResearch can run the full loop autonomously: propose an idea, change the
-code, launch an experiment, inspect the evidence, and decide what to try next.
-Multiple agents can explore different directions in parallel while the
-experiment tree preserves their lineage.
-
-## Run anywhere
-
-The same committed source snapshot can run locally, over SSH, or on Slurm,
-Kubernetes, Ray, Hugging Face Jobs, Modal, Tinker, and managed OpenResearch compute.
-Publishing the repository is not required.
-
-Run the workspace next to remote GPUs while using the browser on your laptop:
+**4. On a remote machine, browser on your laptop.** Install `orx` on the remote
+machine (method 1 or 2), then from your laptop:
 
 ```sh
 orx up --remote user@host
 ```
 
-SSH config aliases and custom ports are supported. The remote service binds to
-loopback and has no application-level authentication, so other users on that
-host can reach it.
+This starts `orx` on the remote machine and tunnels it to your browser. SSH
+config aliases and custom ports work. The remote service listens on loopback
+only and has no login, so other users on that machine can reach it.
 
-## CLI and agent integration
+## What it does
 
-Install the OpenResearch skill into supported coding agents:
+| | |
+|---|---|
+| **Parallel exploration** | Each research direction gets its own agent session and git worktree. |
+| **Reproducible experiments** | A git-based experiment tree; every run gets an immutable archive of its commit. |
+| **Evidence in context** | Logs, diffs, files and results stay tied to the work that produced them. |
+| **Your choice of agent** | Claude Code, Codex, OpenCode, Cursor or Antigravity, chosen per session. |
+| **Your choice of compute** | Local, SSH, Slurm, SGE, Kubernetes, Ray, Modal, Hugging Face Jobs and more. |
+| **Local ownership** | Projects, chats, runs, logs and code stay on your machine, in a local SQLite store. |
+
+Runs use a committed snapshot of your code, so nothing has to be published.
+
+## CLI
 
 ```sh
-orx install-skills
-```
-
-Common commands:
-
-```sh
+orx install-skills          # add the OpenResearch skill to your coding agents
 orx projects
-orx project view <project-id>
 orx runs <project-id>
 orx logs <run-id>
 orx exp run <experiment-id>
-orx discover keyword <query>
 orx paper <arxiv-id-or-doi>
 ```
 
-Run `orx --help` or `orx <command> --help` for the complete interface.
-
-## Local by default
-
-OpenResearch runs on `127.0.0.1` with a local SQLite store. Creating a project
-or launching a run does not publish your code. An
-[openresearch.sh](https://openresearch.sh) account is only used for
-service-owned capabilities such as organizations and managed compute.
+Run `orx --help` for everything else.
 
 ## Usage analytics
 
-Official release builds send opt-out, coarse usage events tied to a random
-installation ID. They do not include code, prompts, file contents or paths,
-repository names, tokens, emails, or project and experiment identifiers.
+Release builds, including this fork's, send coarse, opt-out usage events tied to
+a random installation ID to `api.openresearch.sh`. They contain no code,
+prompts, file contents, paths, repository names, tokens or emails. Source and
+development builds send nothing.
 
 ```sh
 orx telemetry off
 orx telemetry status
-orx <command> --no-telemetry
 ```
 
-Source and development builds do not send analytics.
+## Contributing
+
+See [AGENTS.md](AGENTS.md) for the branch flow, checks and release process.
