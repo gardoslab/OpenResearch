@@ -82,6 +82,7 @@ impl ResyncReport {
 }
 
 /// How long to wait for a signalled supervisor to actually let go of its lock.
+#[cfg(unix)]
 const RESYNC_HANDOVER: Duration = Duration::from_secs(5);
 
 /// Restart supervision of `run_id` from scratch: the manual fallback for a
