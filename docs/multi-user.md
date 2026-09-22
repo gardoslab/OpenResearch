@@ -65,7 +65,9 @@ Three independent reasons, each sufficient on its own:
 
 ## Four tiers of response
 
-### Tier 0 — turn on GitHub syncing (already built)
+### Tier 0 — turn on what already exists (recommended first step)
+
+#### GitHub syncing
 
 `orx` can already do this, and it is off by default. Settings has a "GitHub
 publishing" toggle: with it on, each new project gets a private GitHub
@@ -94,16 +96,79 @@ find" unanswered. That gap is the whole case for Tiers 1 and 2.
 Two caveats worth knowing:
 
 - Project repositories are created under the *personal* account of whoever
-  creates them (`create_project_repo` in `src/local/github.rs` uses the
-  authenticated `gh` login), so each person adds the others as collaborators by
-  hand, per repository. Repositories under a shared organization would suit a
-  lab better.
+  creates them: `create_project_repo` in `src/local/github.rs` calls
+  `viewer_login()` and creates `<your-login>/<repo> --private`. Every project
+  therefore becomes a repository under an individual's account, and collaborators
+  are added by hand, one repository at a time. For a lab, repositories under a
+  shared organization would be markedly better — see the proposal below.
 - Pushes are fire-and-forget: the worker is detached with stdout and stderr
   discarded, and a failure surfaces only as a single line on stderr. There is a
   `publication_sync_status` helper that checks with `ls-remote`, but do not
   assume a branch arrived without looking.
 
-Cost: none, it exists. Covers roughly half the need.
+#### Proposal: let new repositories target a shared organization
+
+A small, self-contained change, following the existing `github_for_new_projects`
+setting end to end:
+
+1. `github_org: Option<String>` on the `Settings` struct in `src/telemetry.rs`,
+   with a getter that treats an empty string as unset, plus a setter, both
+   routed through `mutate_settings` like every other field.
+2. Re-export both through `src/config.rs`.
+3. A `project_repo_owner()` helper in `src/local/github.rs` returning the
+   configured organization, else `viewer_login()`. Both `create_project_repo`
+   and `available_project_repo_name` call it, so choosing a name and creating
+   the repository cannot disagree.
+4. Surface `githubOrg` on the existing `/api/settings/projects` GET and accept
+   it on the POST, in `src/commands/up.rs`.
+5. A text field beside the existing toggle in `SettingsPage.tsx`, with the
+   matching `ui/messages/*.json` keys for all six locales, and a rebuilt
+   `ui/dist`.
+
+Blank preserves today's behaviour exactly, so the change is additive. Worth
+surfacing a clear error when the organization is misspelled or the account
+cannot create repositories in it, since `gh repo create` fails at that point
+rather than where the name was chosen. Plausibly something upstream would take.
+
+#### Experiment tracking
+
+Our training code already logs to Weights & Biases, and `orx` nudges toward it:
+the agent skill in `src/local/skills.rs` tells agents to "prefer Weights &
+Biases — log each run to a project named after the paper", and `WANDB_API_KEY`
+is one of the recommended environment keys in Settings. Upstream's implicit
+answer to "where do results live" is therefore W&B, not `orx`.
+
+Pointed at a shared W&B team rather than personal entities, this covers most of
+what the tiers below were reaching for: metrics, curves, run configuration,
+system stats, artifacts and stdout, all visible to everyone in the team, live,
+with no new software and no fork changes.
+
+Cost: none, both exist. Together they cover most of the need.
+
+### What Tier 0 still leaves out
+
+With GitHub syncing and a shared W&B team both on, the residual gap is narrow.
+It is worth naming precisely, because it is what Tiers 1 to 3 would buy:
+
+- **The join between the two halves.** Nothing connects a W&B run back to the
+  `orx` experiment, branch and commit that produced it, unless the training code
+  logs that itself. Without it you can see someone's curves and someone's
+  branches but cannot reliably tell which produced which.
+- **Runs that fail before training starts.** A submit error, an SGE queue
+  rejection or a crash before `wandb.init()` never reaches W&B, and its status
+  and logs stay in the launching user's `orx.db` and `run-logs/`.
+- **Chat transcripts and the agent's reasoning.** Why an experiment was tried,
+  what the agent considered and rejected. This is `orx`-specific, has no
+  equivalent in either tool, and is arguably the most novel thing the workspace
+  records.
+- **Experiment tree lineage.** Which experiment was forked from which. Branch
+  names encode an experiment's identity but not its `parent_experiment_id`.
+- **Titles and descriptions**, which live only in the local store.
+
+The first item is much the most valuable and much the cheapest: have the
+training code pass the `orx` experiment id, branch and commit into
+`wandb.init(config=...)` or as tags. That is a change to our own training code,
+not to `orx`, and it turns two partial views into one navigable one.
 
 ### Tier 1 — read-only snapshot export
 
@@ -126,20 +191,24 @@ Two caveats:
   so the UI does not offer actions that would fail — or, worse, write into
   someone else's export.
 
-Cost: days, not weeks. Self-contained, low merge risk.
+Cost: days, not weeks. Self-contained, low merge risk — but only worth starting
+if Tier 2 is going ahead, since the lab view is what consumes the exports.
 
-### Tier 2 — a lab view (recommended)
+### Tier 2 — a lab view (only if Tier 0 proves insufficient)
 
 A small separate service ingests everyone's Tier-1 exports on a timer and serves
 one combined, read-only dashboard: who is running what, which experiments exist,
 which results have landed.
 
-This is the shape that actually answers *"what has everyone been working on and
-what did they find"*. Critically, it does not touch `orx`'s single-user model at
-all, so it survives upstream merges untouched, and it could live outside this
-repository entirely.
+Before W&B entered the picture this looked like the answer to *"what did they
+find"*. With a shared W&B team carrying results, what it adds over Tier 0 is
+chat transcripts, experiment-tree lineage and the runs that died before training
+started. Its merit is that it does not touch `orx`'s single-user model at all,
+so it survives upstream merges untouched and could live outside this repository
+entirely.
 
-Cost: weeks. Highest value per unit of maintenance risk.
+Cost: weeks, plus a service to keep running. Hard to justify until the Tier 0
+gap is felt.
 
 ### Tier 3 — true multi-user orx (not recommended)
 
@@ -158,9 +227,23 @@ token, and both `DASHBOARD_PROTOCOL` and `CONTROL_PROTOCOL` version negotiation.
 
 ## Recommendation
 
-Do Tier 0 now. Treat Tier 2 as the real project, with Tier 1 as its first
-deliverable since the lab view needs the exports anyway. Avoid Tier 3 unless
-the lab view proves insufficient in practice.
+Do Tier 0, and stop there for now.
+
+Turn on GitHub syncing, point W&B at a shared team, and make the training code
+stamp each W&B run with its `orx` experiment id, branch and commit. That is a
+few hours of work, no fork changes, and it covers code, results and the link
+between them — which was the whole question.
+
+Then use it for a few weeks and see what is actually missing. The honest case
+for Tiers 1 and 2 is much weaker once W&B is carrying the results: they would
+mainly add chat transcripts, tree lineage and the status of runs that died
+before training began. That may well not be worth a service to maintain. Build
+them only if the gap bites in practice, and Tier 3 only if the lab view proves
+insufficient after that.
+
+The organization-target change under Tier 0 is worth doing on its own merits:
+it is small, additive, and makes GitHub syncing behave sensibly for a group
+rather than an individual.
 
 Separately, consider opening an issue upstream describing the lab scenario.
 Issue #316 drew "let's see if more people ask"; a second concrete demand signal
@@ -169,9 +252,12 @@ to maintain.
 
 ## Open questions
 
+- Are we all logging to a shared W&B team already, or to personal entities? The
+  whole Tier 0 argument depends on the former.
+- Does the training code already record the `orx` experiment or commit in the
+  W&B run config? If not, that is the single highest-value change here.
 - Do people want to *see* each other's chat transcripts, or only experiments and
   results? The latter is a much smaller surface and avoids most privacy
   questions.
-- Should exports be opt-in per project, or whole-store?
-- Where would a lab view live — this repository, a separate one, or a service on
-  the shared machine?
+- Should the organization target be a global default, or selectable per project
+  when a project is created?
