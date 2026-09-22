@@ -132,11 +132,26 @@ rather than where the name was chosen. Plausibly something upstream would take.
 
 #### Experiment tracking
 
-Our training code already logs to Weights & Biases, and `orx` nudges toward it:
-the agent skill in `src/local/skills.rs` tells agents to "prefer Weights &
-Biases — log each run to a project named after the paper", and `WANDB_API_KEY`
-is one of the recommended environment keys in Settings. Upstream's implicit
-answer to "where do results live" is therefore W&B, not `orx`.
+Our training code already logs to Weights & Biases, and `orx` steers toward it.
+Both references are upstream's, not additions of this fork:
+
+- The agent skill in `src/local/skills.rs` tells agents "Optional tracking: if
+  the user wants metrics logged, prefer Weights & Biases — check `wandb login` /
+  `WANDB_API_KEY` and log each run to a project named after the paper. Don't
+  require it." That line arrived in `e8972bb` on 2026-07-10 and is still in
+  `upstream/main`.
+- `WANDB_API_KEY` is one of three `RECOMMENDED_ENV_KEYS` in the Settings UI,
+  alongside `TINKER_API_KEY` and `HF_TOKEN`, in `upstream/main` as well as here.
+
+The sequence is what makes this more than a coincidence: upstream shipped that
+guidance in July 2026, then deleted server-side run state a month later in
+`505b272` (2026-08-17). Read together, the split is deliberate — `orx` owns
+code, experiments and orchestration; a tracker owns metrics and results.
+
+Two honest qualifications. The skill line is hedged ("Optional... Don't require
+it"), so it is a default preference rather than an architectural commitment, and
+upstream has nowhere stated outright that results belong in W&B. This is an
+inference from what they shipped, not a documented position.
 
 Pointed at a shared W&B team rather than personal entities, this covers most of
 what the tiers below were reaching for: metrics, curves, run configuration,
