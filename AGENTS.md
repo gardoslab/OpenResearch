@@ -10,11 +10,10 @@ Git remotes: `gardoslab` is this fork (the one we push to and release from), `up
 
 ## Branches
 
-- `main` is what gets released. Every merge to `main` goes through a pull request, and a version bump there publishes a release.
-- `dev` branches off `main` and is where finished work collects. Merge `dev` into `main` by pull request when you want to release.
-- Add features and fixes on topic branches off `dev` (`git switch dev && git switch -c my-feature`), and open the pull request against `dev`, not `main`.
-- Keep `dev` current by merging `main` back into it after each release.
-- Urgent release fixes may branch off `main` directly and go straight to `main`; merge `main` into `dev` afterwards.
+- `dev` is what gets released. Every merge to `dev` goes through a pull request, and a version bump there publishes a release.
+- Add features and fixes on topic branches off `dev` (`git switch dev && git switch -c my-feature`), and open the pull request against `dev`.
+- `main` only tracks the parent, `upstream` (alphaXiv/OpenResearch) — nothing of ours merges into it, and it is never released. Keep it current with `git merge upstream/main` (fast-forward when possible) pushed straight to `main`; it carries no fork-specific changes, so it needs no PR.
+- Bring upstream changes into our own work by merging `upstream/main` into `dev` (see above), independent of keeping `main` in sync.
 
 ## Development guidelines
 
@@ -28,12 +27,12 @@ Git remotes: `gardoslab` is this fork (the one we push to and release from), `up
 
 ## CI and release gates
 
-- GitHub protection for `main` should require the `fmt, clippy, test` and `version sanity` checks from GitHub Actions, including for administrators. Do not require a merge queue or require branches to be up to date. These settings are managed in GitHub, not by this file.
-- PR CI must test GitHub's simulated merge (`refs/pull/<number>/merge`), which `actions/checkout` selects by default for `pull_request` events, rather than checking out the PR head alone. Each run tests its merge candidate; subsequent changes to `main` do not automatically rerun open PRs.
-- CI also runs on `main`. Releases call the same CI workflow on the commit being packaged; publishing requires that run to succeed. Keep `./ci` in cargo-dist's `global-artifacts-jobs` when regenerating the release workflow.
-- Releases come from `release-on-bump.yml`: when a push to `main` changes `version` in `Cargo.toml`, it dispatches `release.yml`, which builds Linux, macOS and Windows binaries and publishes the GitHub Release. Bumping the version is the release act, and the version is always a human decision in a reviewed PR.
+- GitHub protection for `dev` should require the `fmt, clippy, test` and `version sanity` checks from GitHub Actions, including for administrators. Do not require a merge queue or require branches to be up to date. `main` needs no such protection — it only ever receives fast-forwards from `upstream/main`. These settings are managed in GitHub, not by this file.
+- PR CI must test GitHub's simulated merge (`refs/pull/<number>/merge`), which `actions/checkout` selects by default for `pull_request` events, rather than checking out the PR head alone. Each run tests its merge candidate; subsequent changes to `dev` do not automatically rerun open PRs.
+- CI also runs on `dev`. Releases call the same CI workflow on the commit being packaged; publishing requires that run to succeed. Keep `./ci` in cargo-dist's `global-artifacts-jobs` when regenerating the release workflow.
+- Releases come from `release-on-bump.yml`: when a push to `dev` changes `version` in `Cargo.toml`, it dispatches `release.yml`, which builds Linux, macOS and Windows binaries and publishes the GitHub Release. Bumping the version is the release act, and the version is always a human decision in a reviewed PR.
 - A version bump PR must also update the lock file: run `cargo update -p openresearch-cli --offline` and commit `Cargo.lock`. CI uses `--locked`, so a stale lock fails the release.
-- If a release run fails, do not re-run it: a re-run replays the old commit. Merge the fix, then run `gh workflow run release.yml -f tag=vX.Y.Z` to build `main` again under the same tag.
+- If a release run fails, do not re-run it: a re-run replays the old commit. Merge the fix, then run `gh workflow run release.yml --ref dev -f tag=vX.Y.Z` to build `dev` again under the same tag.
 - `build.rs` only allows production builds from repositories listed in `OFFICIAL_REPOS` and bakes the building repository into the binary, so `orx update` follows the fork that built it. Adding another release repository means adding it there.
 - `repository` in `Cargo.toml` is what cargo-dist writes into the installer script's download URL. Keep it pointing at `gardoslab/OpenResearch`.
 - Only installer-managed binaries can self-update. A `cargo install` or `cargo run` build cannot, so servers that should update from the dashboard need the installer.

@@ -84,7 +84,7 @@ jobs:
     # The cert-using job. Secrets come from this environment; add required
     # reviewers to it (Settings → Environments) so the Developer ID certificate
     # is never used without a human approving the run — even if an unwanted change
-    # reaches main. Restrict its deployment branches to main. See DISTRIBUTION.md.
+    # reaches dev. Restrict its deployment branches to dev. See DISTRIBUTION.md.
     environment: release-signing
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
