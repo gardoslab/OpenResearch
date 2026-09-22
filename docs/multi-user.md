@@ -6,8 +6,8 @@ for any tier below.*
 Several of us work on the same Ubuntu machine, each with our own account. Today
 each person's `orx` is an island: you cannot see a colleague's experiments,
 their run results, or even that they have `orx` running. This document explains
-why that is, what upstream has decided about it, one hazard that shared machines
-create today, and four possible levels of response.
+why that is, what upstream has decided about it, and four possible levels of
+response.
 
 ## What upstream has decided
 
@@ -62,31 +62,6 @@ Three independent reasons, each sufficient on its own:
 3. Nothing in the schema or the local API can express "another person's
    experiment", so there is no read path to expose even if the file were
    readable.
-
-## A hazard worth fixing first
-
-The dashboard's default port is fixed at 4791. If two people run plain `orx up`
-on the same machine, the second bind fails with `AddrInUse`, and `up.rs` treats
-that as "this is my own already-running dashboard":
-
-```
-orx up: already running — opening http://127.0.0.1:4791
-```
-
-The second person's browser then opens the *first* person's dashboard. In normal
-(non-`--remote-host`) mode that dashboard has no authentication, so this grants
-full read and write access to someone else's projects and chat sessions,
-including the ability to launch runs as them.
-
-Two mitigations, both available today:
-
-- Give each person a distinct `--port`, or
-- use `orx up --remote` from a laptop instead. That path is already safe: it
-  launches the remote side with `--port 0` so the kernel picks a free port, and
-  it is the one mode that requires a session bearer token.
-
-This should be confirmed empirically on the machine before we treat it as
-settled; it is read from the code, not reproduced.
 
 ## Four tiers of response
 
@@ -166,8 +141,6 @@ to maintain.
 
 ## Open questions
 
-- Is the port-collision behaviour above real on our machine, or does something
-  prevent it in practice?
 - Do people want to *see* each other's chat transcripts, or only experiments and
   results? The latter is a much smaller surface and avoids most privacy
   questions.
