@@ -26,7 +26,7 @@ gh workflow run release-macos-app.yml -f tag=v0.1.99
 The manual path checks out `inputs.tag` and runs the signing scripts under the
 `release-signing` environment, so the **required reviewer approving the run is
 the real gate on the certificate** — verify the tag points at trusted code (the
-`main`-only deployment-branch restriction covers the workflow file, not the
+`dev`-only deployment-branch restriction covers the workflow file, not the
 checked-out tag).
 
 ## The app updater's contract
@@ -71,7 +71,7 @@ certificate (see Apple's [notarizing docs](https://developer.apple.com/documenta
 From it you produce the six values below.
 
 1. Create the **`release-signing` environment** (Settings → Environments): add
-   **required reviewers** and set **Deployment branches → `main`**. Add these as
+   **required reviewers** and set **Deployment branches → `dev`**. Add these as
    **environment** secrets (not repo-wide):
 
    | Secret | Value |
@@ -94,7 +94,7 @@ From it you produce the six values below.
    shipping without the auto-attach until it's renewed.
 
 Also enable **Require a pull request** + **Require review from Code Owners** on
-`main` (see `.github/CODEOWNERS`) so the signing scripts can't change unreviewed.
+`dev` (see `.github/CODEOWNERS`) so the signing scripts can't change unreviewed.
 Never commit the `.p12`.
 
 `package-macos-app.sh` signs with `macos/entitlements.plist`, which grants the

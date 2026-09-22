@@ -1,4 +1,4 @@
-# Code owners. Requires "Require review from Code Owners" on the main branch
+# Code owners. Requires "Require review from Code Owners" on the dev branch
 # protection rule to be enforced. Owners must have write access.
 # Swap these handles for a team (e.g. @alphaXiv/maintainers) when one exists.
 
