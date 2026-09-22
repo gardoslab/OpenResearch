@@ -1381,6 +1381,63 @@ fn stall_backoff(probes: u32, grace_expired: bool) -> Duration {
     }
 }
 
+/// How long a `RUNNING` job may go without touching its log before the
+/// silence itself counts as a stall trigger. Well past ordinary quiet spells
+/// (a slow data-loading epoch, a checkpoint write) but short enough to still
+/// be useful — a job wedged on a dead GPU or a hung collective otherwise
+/// looks identical to a healthy one until `h_rt` finally kills it.
+const LOG_SILENCE_THRESHOLD: Duration = Duration::from_secs(30 * 60);
+
+/// Best-effort Slack ping for a run that looks stuck, independent of the
+/// terminal-state wake-up path (`chat::process_run_wakeups`) — a parked
+/// (Eqw) job, a stalled SSH session to the cluster, or a job gone quiet
+/// while still marked running can all sit non-terminal indefinitely, and
+/// none of them otherwise reach the agent or the user until something else
+/// notices. Never fails the supervise loop: a notification is a courtesy,
+/// not part of the state machine.
+fn notify_run_stalled(
+    store: &Store,
+    stored: &crate::store::StoredRun,
+    descriptor: &BackendDescriptor,
+    reason: &str,
+) {
+    let experiment = match store.get_local_experiment(&stored.experiment_id) {
+        Ok(Some(exp)) => exp,
+        Ok(None) => return,
+        Err(err) => {
+            eprintln!(
+                "supervise {}: could not load experiment for stall notice: {err}",
+                stored.id
+            );
+            return;
+        }
+    };
+    let project = match store.get_local_project(&stored.project_id) {
+        Ok(Some(p)) => p,
+        Ok(None) => return,
+        Err(err) => {
+            eprintln!(
+                "supervise {}: could not load project for stall notice: {err}",
+                stored.id
+            );
+            return;
+        }
+    };
+    if let Err(err) = crate::notify_events::enqueue_run_stalled(
+        store,
+        &project,
+        &experiment,
+        stored,
+        descriptor,
+        reason,
+    ) {
+        eprintln!(
+            "supervise {}: could not enqueue Slack stall notice: {err}",
+            stored.id
+        );
+    }
+}
+
 fn stalled_markdown(host: &str, job_id: &str) -> String {
     format!(
         "**Paused — waiting to reconnect to `{host}`.**\n\n\
@@ -1438,6 +1495,12 @@ async fn run_sge(
     // itself failed. Two of these is the scheduler affirmatively saying it
     // has never heard of this job, not just "not yet".
     let mut acct_none_polls = 0u32;
+    // Log-silence tracking for the stall notice: reset whenever the log
+    // file's mtime moves or the job leaves RUNNING; `announced` guards a
+    // single Slack ping per silent episode, same shape as `Transport::Stalled`.
+    let mut last_log_mtime: Option<std::time::SystemTime> = None;
+    let mut last_log_change = tokio::time::Instant::now();
+    let mut silence_announced = false;
     let mut transport = Transport::Up;
     let mut acct: Option<tokio::task::JoinHandle<Result<Option<sge::AcctRecord>>>> = None;
     // Reflects the PREVIOUS iteration's outcome, written at the top of each
@@ -1506,6 +1569,17 @@ async fn run_sge(
                     eprintln!("supervise {run_id}: could not record the stall notice: {err}");
                 }
                 eprintln!("supervise {run_id}: transport stalled — needs `ssh connect {host}`");
+                notify_run_stalled(
+                    &store,
+                    &stored,
+                    &descriptor,
+                    &format!(
+                        "orx lost its SSH session to `{host}` and cannot resume it on its own \
+                         (laptop sleep, VPN, or a Duo prompt it can't answer). The job itself \
+                         may still be running on the cluster — run `orx ssh connect {host}` to \
+                         reconnect."
+                    ),
+                );
                 announced = true;
             }
             transport = Transport::Stalled {
@@ -1542,6 +1616,15 @@ async fn run_sge(
         // --- Eqw: parked forever unless a human runs `qmod -cj` ---
         if job.stage == "BLOCKED" {
             blocked_polls += 1;
+            if blocked_polls == 1 {
+                notify_run_stalled(
+                    &store,
+                    &stored,
+                    &descriptor,
+                    "Grid Engine parked this job in an error state (Eqw). orx will cancel it \
+                     automatically unless it clears on its own.",
+                );
+            }
             if blocked_polls < 2 {
                 supervisor_state = "blocked-wait".to_string();
                 tokio::time::sleep(POLL_INTERVAL).await;
@@ -1639,6 +1722,32 @@ async fn run_sge(
         }
 
         let stage = job.stage.as_str();
+
+        // --- silent RUNNING: qstat still sees it, but the log hasn't moved ---
+        if stage == "RUNNING" {
+            let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            if mtime != last_log_mtime {
+                last_log_mtime = mtime;
+                last_log_change = tokio::time::Instant::now();
+                silence_announced = false;
+            } else if !silence_announced && last_log_change.elapsed() >= LOG_SILENCE_THRESHOLD {
+                notify_run_stalled(
+                    &store,
+                    &stored,
+                    &descriptor,
+                    &format!(
+                        "No new job output for over {} minutes, though Grid Engine still \
+                         reports it running. It may be hung.",
+                        LOG_SILENCE_THRESHOLD.as_secs() / 60
+                    ),
+                );
+                silence_announced = true;
+            }
+        } else {
+            last_log_mtime = None;
+            silence_announced = false;
+        }
+
         let status = run_status_for_stage(&store, &run_id, cancel_sent, stage);
 
         if is_terminal_stage(stage) {
