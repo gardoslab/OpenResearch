@@ -65,17 +65,45 @@ Three independent reasons, each sufficient on its own:
 
 ## Four tiers of response
 
-### Tier 0 — use git (no code changes)
+### Tier 0 — turn on GitHub syncing (already built)
 
-The experiment tree is already git-native: every experiment is a branch, and
-every run archives the commit it recorded. If we add a shared bare remote and
-push experiment branches, we get the *code* half of visibility immediately, with
-full history and no new software.
+`orx` can already do this, and it is off by default. Settings has a "GitHub
+publishing" toggle: with it on, each new project gets a private GitHub
+repository and experiment branches are pushed automatically. Creating an
+experiment and submitting a run each spawn a detached `orx publish-branch`
+worker that runs `git push -u <remote> <branch>`; the branches selected are the
+project's baseline plus everything under `orx/`.
 
-What it does not give us: run status, logs, results, artifacts and chat
-transcripts, all of which live only in each person's SQLite store.
+"Collaborator visibility" in that setting's description means ordinary GitHub
+sharing — whoever you add as a collaborator on the private repository can see
+the branches. `orx` never reads anyone else's synced repository, so this is a
+publishing mechanism, not a shared view.
 
-Cost: an afternoon. Covers roughly half the need.
+What crosses: experiment branches, every commit an agent made, full diffs and
+history. That is genuinely most of *what* someone tried.
+
+What does not cross, because it lives only in each person's `orx.db` and
+`run-logs/`: run status and exit codes, run logs, results, artifacts, chat
+transcripts, experiment titles and descriptions, and the parent/child lineage of
+the experiment tree — branch names encode an experiment's identity, not its
+`parent_experiment_id`.
+
+So Tier 0 answers "what have they been working on" and leaves "what did they
+find" unanswered. That gap is the whole case for Tiers 1 and 2.
+
+Two caveats worth knowing:
+
+- Project repositories are created under the *personal* account of whoever
+  creates them (`create_project_repo` in `src/local/github.rs` uses the
+  authenticated `gh` login), so each person adds the others as collaborators by
+  hand, per repository. Repositories under a shared organization would suit a
+  lab better.
+- Pushes are fire-and-forget: the worker is detached with stdout and stderr
+  discarded, and a failure surfaces only as a single line on stderr. There is a
+  `publication_sync_status` helper that checks with `ls-remote`, but do not
+  assume a branch arrived without looking.
+
+Cost: none, it exists. Covers roughly half the need.
 
 ### Tier 1 — read-only snapshot export
 
