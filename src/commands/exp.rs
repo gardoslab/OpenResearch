@@ -130,6 +130,29 @@ pub(crate) fn default_hf_image(flavor: &str) -> String {
     }
 }
 
+/// Register a run-finished wake-up for the chat session that launched `run`.
+///
+/// Agents used to have to remember `orx exp wake`; a forgotten call meant the
+/// session never resumed when a long job ended. Launching from an agent session
+/// now implies the wake-up. Best-effort: a store hiccup must not fail a launch
+/// whose job is already submitted.
+pub(crate) fn register_launch_wakeup(store: &Store, run: &crate::store::StoredRun) {
+    let Some(session_id) = run.chat_session_id.as_deref() else {
+        return;
+    };
+    match store.get_chat_session(session_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => return,
+        Err(err) => {
+            eprintln!("orx: could not check chat session for wake-up: {err}");
+            return;
+        }
+    }
+    if let Err(err) = store.register_run_wakeup(&run.id, session_id) {
+        eprintln!("orx: could not schedule wake-up for run {}: {err}", run.id);
+    }
+}
+
 /// Spawn `orx supervise <runId>` fully detached (own process group, no stdio),
 /// so it outlives this command and any SSH session that launched it.
 pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
@@ -223,6 +246,62 @@ mod tests {
             cancel_requested: false,
             chat_session_id: None,
         }
+    }
+
+    #[test]
+    fn launch_registers_wakeup_only_for_a_live_launching_session() {
+        let dir = std::env::temp_dir().join(format!("orx-launch-wake-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&crate::store::StoredChatSession {
+                id: "chat_A".into(),
+                project_id: "project-1".into(),
+                harness: "claude-code".into(),
+                native_session_id: None,
+                title: None,
+                title_source: None,
+                model: None,
+                service_tier: None,
+                permission_mode: None,
+                plan_mode: false,
+                plan_reset_pending: false,
+                reasoning_level: None,
+                archived: false,
+                context_usage_json: None,
+                bootstrap_context: None,
+                active_leaf_id: None,
+                parent_session_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+
+        let mut owned = run_fixture();
+        owned.id = "run-owned".into();
+        owned.status = "done".into();
+        owned.chat_session_id = Some("chat_A".into());
+        let mut gone = run_fixture();
+        gone.id = "run-gone".into();
+        gone.status = "done".into();
+        gone.chat_session_id = Some("chat_deleted".into());
+        let mut orphan = run_fixture();
+        orphan.id = "run-orphan".into();
+        orphan.status = "done".into();
+        for run in [&owned, &gone, &orphan] {
+            store.upsert_run(run).unwrap();
+            register_launch_wakeup(&store, run);
+        }
+
+        let ready: Vec<String> = store
+            .list_ready_run_wakeups()
+            .unwrap()
+            .into_iter()
+            .map(|w| w.run.id)
+            .collect();
+        assert_eq!(ready, vec!["run-owned".to_string()]);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
