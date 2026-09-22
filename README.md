@@ -67,6 +67,21 @@ This starts `orx` on the remote machine and tunnels it to your browser. SSH
 config aliases and custom ports work. The remote service listens on loopback
 only and has no login, so other users on that machine can reach it.
 
+If it reports that OpenResearch is not installed on the remote machine even
+though `ssh user@host 'which orx'` finds it, the problem is permissions, not
+PATH. Before launching, `orx` requires the remote binary to be owned by you or
+root, and requires that neither the binary nor its parent directory is group-
+or world-writable. A `cargo install` under Ubuntu's default umask of 002 leaves
+`~/.cargo/bin` at mode 775, which fails that check:
+
+```sh
+ssh user@host 'chmod g-w ~/.cargo/bin'
+```
+
+The dashboard's Install button does not help here: it installs into that same
+directory and then fails the same check, reporting that the installer finished
+but no working `orx` binary was found.
+
 ## What it does
 
 | | |
