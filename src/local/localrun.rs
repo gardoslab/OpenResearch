@@ -166,6 +166,7 @@ async fn submit_controller_run(
         eprintln!("orx up: could not enqueue Slack job-submitted notification: {err}");
     }
 
+    crate::commands::exp::register_launch_wakeup(&store, &run);
     spawn_detached_supervise(&run_id)?;
     Ok(run)
 }

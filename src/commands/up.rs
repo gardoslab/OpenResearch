@@ -5289,6 +5289,7 @@ fn slack_settings_json() -> Value {
         "events": {
             "jobSubmitted": events.job_submitted,
             "runSynthesized": events.run_synthesized,
+            "runStalled": events.run_stalled,
         },
     })
 }
@@ -5340,6 +5341,7 @@ async fn delete_slack_webhook() -> ApiResult {
 struct SetSlackEventsReq {
     job_submitted: bool,
     run_synthesized: bool,
+    run_stalled: bool,
 }
 
 async fn set_slack_events(Json(req): Json<SetSlackEventsReq>) -> ApiResult {
@@ -5347,11 +5349,13 @@ async fn set_slack_events(Json(req): Json<SetSlackEventsReq>) -> ApiResult {
         crate::telemetry::set_slack_event_settings(crate::telemetry::SlackEventSettings {
             job_submitted: req.job_submitted,
             run_synthesized: req.run_synthesized,
+            run_stalled: req.run_stalled,
         })
         .map_err(|e| ApiError::from(anyhow!("could not save slack event settings: {e}")))?;
         Ok(Json(json!({
             "jobSubmitted": req.job_submitted,
             "runSynthesized": req.run_synthesized,
+            "runStalled": req.run_stalled,
         })))
     })
     .await

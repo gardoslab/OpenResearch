@@ -207,9 +207,10 @@ pub async fn submit_local_openresearch_with_source(
 
     // From here the box is billing: never leak it behind an error the store
     // doesn't know about.
-    let persisted = store
-        .upsert_run(&run)
-        .and_then(|()| spawn_detached_supervise(&run_id));
+    let persisted = store.upsert_run(&run).and_then(|()| {
+        crate::commands::exp::register_launch_wakeup(&store, &run);
+        spawn_detached_supervise(&run_id)
+    });
     if let Err(err) = persisted {
         eprintln!(
             "submit failed after the box was provisioned — deleting box {}",

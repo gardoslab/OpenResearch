@@ -215,6 +215,47 @@ pub fn enqueue_run_synthesized(
     Ok(())
 }
 
+/// Enqueue the "a run looks stuck" notification. Called from the supervisor
+/// loop itself (not a launcher, and not the wake-up turn hook), the moment
+/// one of its stall triggers first fires for a given episode — a parked
+/// (Eqw) job, a stalled SSH session to the cluster, or a job gone quiet
+/// while still marked running. Unlike `enqueue_run_synthesized`, this never
+/// waits on the run reaching a terminal state, because a stuck run may not.
+/// A no-op unless `slack_events.run_stalled` is on and a webhook is saved.
+pub fn enqueue_run_stalled(
+    store: &Store,
+    project: &LocalProject,
+    experiment: &LocalExperiment,
+    run: &StoredRun,
+    descriptor: &BackendDescriptor,
+    reason: &str,
+) -> Result<()> {
+    if !slack_ready(crate::telemetry::slack_event_settings().run_stalled) {
+        return Ok(());
+    }
+    let ordinal = run_ordinal(store, &experiment.id, &run.id)?;
+    let header = header_line(
+        &project.name,
+        experiment.display_name(),
+        ordinal,
+        descriptor.job_label().as_deref(),
+    );
+    let mut details = vec![reason.to_string()];
+    if let Some(link) = deep_link(
+        &project.id,
+        &experiment.id,
+        &run.id,
+        run.chat_session_id.as_deref(),
+    ) {
+        details.push(format!("<{link}|Open in orx>"));
+    }
+    store.enqueue_notification(
+        "run_stalled",
+        &payload(&header, &details.join("\n\n")).to_string(),
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,6 +453,59 @@ mod tests {
             let text = payload["text"].as_str().unwrap();
             assert!(text.contains("All done."));
             assert!(text.contains("description changed"));
+            drop(store);
+            let _ = std::fs::remove_dir_all(dir);
+        });
+    }
+
+    #[test]
+    fn run_stalled_is_a_no_op_without_a_webhook() {
+        with_isolated_config_dir(|| {
+            let dir = store_dir("run-stalled-unconfigured");
+            let store = Store::open_at(dir.clone()).unwrap();
+            let r = run();
+            store.upsert_run(&r).unwrap();
+            enqueue_run_stalled(
+                &store,
+                &project(),
+                &experiment(),
+                &r,
+                &descriptor(),
+                "stuck",
+            )
+            .unwrap();
+            assert_eq!(store.list_pending_notifications(10).unwrap().len(), 0);
+            drop(store);
+            let _ = std::fs::remove_dir_all(dir);
+        });
+    }
+
+    #[test]
+    fn run_stalled_names_the_experiment_and_the_job_id() {
+        with_isolated_config_dir(|| {
+            crate::config::set_slack_webhook_url("https://hooks.slack.com/services/T0/B0/xyz")
+                .unwrap();
+            let dir = store_dir("run-stalled-configured");
+            let store = Store::open_at(dir.clone()).unwrap();
+            let r = run();
+            store.upsert_run(&r).unwrap();
+            enqueue_run_stalled(
+                &store,
+                &project(),
+                &experiment(),
+                &r,
+                &descriptor(),
+                "Grid Engine parked this job in an error state (Eqw).",
+            )
+            .unwrap();
+            let pending = store.list_pending_notifications(10).unwrap();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].kind, "run_stalled");
+            let payload: Value = serde_json::from_str(&pending[0].payload_json).unwrap();
+            let text = payload["text"].as_str().unwrap();
+            assert!(text.contains("Baseline"), "{text}");
+            assert!(text.contains("SGE 12345 @ login1"), "{text}");
+            assert!(text.contains("Eqw"), "{text}");
             drop(store);
             let _ = std::fs::remove_dir_all(dir);
         });

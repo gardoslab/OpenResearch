@@ -102,6 +102,9 @@ pub async fn submit_local_sge_with_source(
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
 
+    // Lets the payload (or a callback script) say which run it belongs to.
+    env.insert("ORX_RUN_ID".to_string(), run_id.clone());
+
     // Per-user leaf under the configured base: /projectnb is a shared group
     // filesystem and our run dirs are 0700, so without this a labmate's staging
     // would trip over our unreadable cache entries.
@@ -191,6 +194,7 @@ pub async fn submit_local_sge_with_source(
         eprintln!("orx up: could not enqueue Slack job-submitted notification: {err}");
     }
 
+    crate::commands::exp::register_launch_wakeup(&store, &run);
     spawn_detached_supervise(&run_id)?;
     Ok(run)
 }

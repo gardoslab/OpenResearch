@@ -154,6 +154,7 @@ pub async fn submit_local_hf_with_source(
         eprintln!("orx up: could not enqueue Slack job-submitted notification: {err}");
     }
 
+    crate::commands::exp::register_launch_wakeup(&store, &run);
     spawn_detached_supervise(&run_id)?;
     Ok(run)
 }

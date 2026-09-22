@@ -3214,7 +3214,7 @@ function SlackSection() {
   const patch = (next: Partial<SlackSettings>) =>
     setScopedQueryData(settingsOptions.queryKey, {
       hasWebhook: settings?.hasWebhook ?? false,
-      events: settings?.events ?? { jobSubmitted: false, runSynthesized: false },
+      events: settings?.events ?? { jobSubmitted: false, runSynthesized: false, runStalled: false },
       ...next,
     });
   const [saving, setSaving] = useState(false);
@@ -3232,7 +3232,7 @@ function SlackSection() {
       .finally(() => setSaving(false));
   };
 
-  const toggleEvent = (key: "jobSubmitted" | "runSynthesized") => {
+  const toggleEvent = (key: "jobSubmitted" | "runSynthesized" | "runStalled") => {
     if (!settings || saving) return;
     setSaving(true);
     setError(null);
@@ -3295,6 +3295,19 @@ function SlackSection() {
               aria-label={m.settings_page_slack_job_submitted_title()}
               disabled={!settings || saving}
               onClick={() => toggleEvent("jobSubmitted")}
+            />
+          </div>
+          <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+            <div>
+              <div className="project-default-title text-base font-medium">{m.settings_page_slack_run_stalled_title()}</div>
+              <p>{m.settings_page_slack_run_stalled_description()}</p>
+            </div>
+            <Switch
+              type="button"
+              checked={settings.events.runStalled}
+              aria-label={m.settings_page_slack_run_stalled_title()}
+              disabled={!settings || saving}
+              onClick={() => toggleEvent("runStalled")}
             />
           </div>
           <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>

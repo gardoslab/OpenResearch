@@ -191,9 +191,9 @@ pub(crate) struct ProfilePaper {
     pub title: Option<String>,
 }
 
-/// Which of T6's two Slack events a user wants delivered. Both default on —
-/// a user who bothered to save a webhook almost certainly wants both, and
-/// this is the one settings struct where "off" must be an explicit save, not
+/// Which of these Slack events a user wants delivered. All default on — a
+/// user who bothered to save a webhook almost certainly wants them, and this
+/// is the one settings struct where "off" must be an explicit save, not
 /// merely an absent field (unlike `telemetry_disabled`, where absence means
 /// enabled by a different mechanism entirely).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,6 +203,14 @@ pub(crate) struct SlackEventSettings {
     pub job_submitted: bool,
     #[serde(default = "default_true")]
     pub run_synthesized: bool,
+    /// A run that looks stuck rather than finished: parked (Eqw), the
+    /// supervisor's SSH session to the cluster is stalled, or the job has
+    /// gone quiet while still marked running. Distinct from
+    /// `run_synthesized`, which fires only once the agent has produced an
+    /// outcome for a *terminal* run — a stuck run may never reach one on its
+    /// own.
+    #[serde(default = "default_true")]
+    pub run_stalled: bool,
 }
 
 impl Default for SlackEventSettings {
@@ -210,6 +218,7 @@ impl Default for SlackEventSettings {
         Self {
             job_submitted: true,
             run_synthesized: true,
+            run_stalled: true,
         }
     }
 }
