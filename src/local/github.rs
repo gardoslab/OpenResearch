@@ -22,9 +22,14 @@ pub fn should_shallow_clone(size_kb: Option<u64>) -> bool {
 
 pub async fn status() -> Status {
     let installed = gh(&["--version"], Duration::from_secs(5)).await.is_ok();
+    // No `--active`: it doesn't exist on every `gh` a user might have (e.g. the
+    // Ubuntu-packaged 2.46.0), and an unrecognized flag makes `gh` exit non-zero
+    // regardless of auth state — so this would report "not authenticated" for a
+    // genuinely logged-in user. `--hostname` alone still exits 0 only when some
+    // account is logged in to that host, which is all this check needs.
     let authenticated = installed
         && gh(
-            &["auth", "status", "--active", "--hostname", "github.com"],
+            &["auth", "status", "--hostname", "github.com"],
             Duration::from_secs(10),
         )
         .await
