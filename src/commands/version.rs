@@ -26,7 +26,7 @@ pub async fn run(args: crate::VersionArgs) -> Result<()> {
     let current = updates::current_version();
 
     if !args.check && !args.json {
-        println!("orx {}", current);
+        println!("{}", updates::version_line(&current));
         return Ok(());
     }
 
@@ -48,6 +48,7 @@ pub async fn run(args: crate::VersionArgs) -> Result<()> {
             "{}",
             serde_json::json!({
                 "current": current.to_string(),
+                "upstreamBase": updates::upstream_base(),
                 "latest": latest.as_ref().map(|v| v.to_string()),
                 "updateAvailable": update_available,
                 // How this copy was installed, and whether it keeps itself
@@ -60,7 +61,7 @@ pub async fn run(args: crate::VersionArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!("orx {}", current);
+    println!("{}", updates::version_line(&current));
     match latest.filter(|_| update_available) {
         Some(latest) => println!(
             "A new release is available: {} → {}. Run `{} update` to upgrade.",

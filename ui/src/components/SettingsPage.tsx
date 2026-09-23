@@ -3042,6 +3042,12 @@ function UpdatesTab() {
         <div className={`${KV_CLASS_NAME} pb-3.5`}>
           <div className="k">{m.settings_page_version()}</div>
           <div className="v">{status.current}</div>
+          {status.upstreamBase && (
+            <>
+              <div className="k">{m.settings_page_upstream_base()}</div>
+              <div className="v">{status.upstreamBase}</div>
+            </>
+          )}
           <div className="k">{m.settings_page_latest()}</div>
           <div className="v">{status.latest ?? "—"}</div>
           <div className="k">{m.settings_page_install()}</div>

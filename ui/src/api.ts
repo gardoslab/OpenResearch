@@ -870,6 +870,9 @@ export type InstallChannel = "installer" | "app-bundle" | "portable" | "cargo" |
 
 export interface UpdateStatus {
   current: string;
+  /** Upstream release this build is merged up to. Annotation only: it is never
+   *  compared against anything, and is null when the build recorded no base. */
+  upstreamBase: string | null;
   /** Latest release this install can actually move to — the macOS app and the
    *  CLI read different manifests, and the app's can lag. */
   latest: string | null;

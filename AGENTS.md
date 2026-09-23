@@ -14,6 +14,7 @@ Git remotes: `gardoslab` is this fork (the one we push to and release from), `up
 - Add features and fixes on topic branches off `dev` (`git switch dev && git switch -c my-feature`), and open the pull request against `dev`.
 - `main` only tracks the parent, `upstream` (alphaXiv/OpenResearch) — nothing of ours merges into it, and it is never released. Keep it current with `git merge upstream/main` (fast-forward when possible) pushed straight to `main`; it carries no fork-specific changes, so it needs no PR.
 - Bring upstream changes into our own work by merging `upstream/main` into `dev` (see above), independent of keeping `main` in sync.
+- That merge also updates `UPSTREAM_VERSION` at the repository root to the upstream release `dev` now carries, in the same pull request. `build.rs` bakes it in so `orx --version` reports `orx <ours> (upstream <theirs>)`. It is an annotation only — never compared against anything — so our own `Cargo.toml` version stays a plain semver line and a stale value cannot affect update checks.
 
 ## Development guidelines
 

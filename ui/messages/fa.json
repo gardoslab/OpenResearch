@@ -487,6 +487,7 @@
   "settings_page_value": "مقدار",
   "settings_page_variables_available_to_runs_and_the_research_agent": "متغیرهای در دسترس اجراها و عامل پژوهشی (کلیدهای API، توکن‌ها).",
   "settings_page_version": "نسخه",
+  "settings_page_upstream_base": "نسخه مبدأ بالادست",
   "settings_page_when_enabled_each_new_project_gets_a_private": "با فعال شدن، هر پروژهٔ جدید یک مخزن خصوصی GitHub می‌گیرد. شاخه‌های آزمایش برای دیده‌شدن توسط همکاران خودکار push می‌شوند. رایانش همیشه از snapshot مستقیم منبع استفاده می‌کند.",
   "settings_page_with_a_token_saved_a_paper_opened_in": "با ذخیرهٔ توکن، مقاله‌ای که در داشبورد باز شده می‌تواند در هر دو جهت با یک پروژهٔ Overleaf همگام بماند. یکپارچه‌سازی Git در Overleaf به طرح پولی نیاز دارد؛ بدون آن هم می‌توان مقاله را به‌عنوان پروژه‌ای جدید در Overleaf بارگذاری کرد. توکن روی همین دستگاه می‌ماند و به backendهای رایانشی فرستاده نمی‌شود.",
   "settings_page_work_dir": "پوشهٔ کاری",

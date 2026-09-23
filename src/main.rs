@@ -37,11 +37,24 @@ mod workspace_state;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+/// What `orx --version` prints. Composed at compile time so it matches what
+/// `orx version` reports; clap needs a `&'static str`, not a runtime call.
+const VERSION_WITH_UPSTREAM_BASE: &str = if env!("ORX_UPSTREAM_BASE").is_empty() {
+    env!("CARGO_PKG_VERSION")
+} else {
+    concat!(
+        env!("CARGO_PKG_VERSION"),
+        " (upstream ",
+        env!("ORX_UPSTREAM_BASE"),
+        ")"
+    )
+};
+
 #[derive(Parser, Debug)]
 #[command(
     name = "orx",
     about = "OpenResearch CLI",
-    version,
+    version = VERSION_WITH_UPSTREAM_BASE,
     disable_help_subcommand = true
 )]
 struct Cli {

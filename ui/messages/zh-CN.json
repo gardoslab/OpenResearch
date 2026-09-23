@@ -487,6 +487,7 @@
   "settings_page_value": "值",
   "settings_page_variables_available_to_runs_and_the_research_agent": "可供运行和研究智能体使用的变量（API 密钥、令牌）。",
   "settings_page_version": "版本",
+  "settings_page_upstream_base": "上游基线版本",
   "settings_page_when_enabled_each_new_project_gets_a_private": "启用后，每个新项目都会获得一个私有 GitHub 仓库。实验分支会自动推送，便于协作者查看。算力执行始终使用直接的源代码快照。",
   "settings_page_with_a_token_saved_a_paper_opened_in": "保存令牌后，可让控制台中打开的论文与 Overleaf 项目双向保持同步。Overleaf 的 Git 集成需要付费方案；没有付费方案时，仍可将论文作为新项目上传到 Overleaf。令牌仅保存在此计算机上，不会发送到算力后端。",
   "settings_page_work_dir": "工作目录",
