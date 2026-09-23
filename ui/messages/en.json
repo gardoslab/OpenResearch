@@ -487,6 +487,7 @@
   "settings_page_value": "value",
   "settings_page_variables_available_to_runs_and_the_research_agent": "Variables available to runs and the research agent (API keys, tokens).",
   "settings_page_version": "Version",
+  "settings_page_upstream_base": "Upstream base",
   "settings_page_when_enabled_each_new_project_gets_a_private": "When enabled, each new project gets a private GitHub repository. Experiment branches are pushed automatically for collaborator visibility. Compute always uses direct source snapshots.",
   "settings_page_with_a_token_saved_a_paper_opened_in": "With a token saved, a paper opened in the dashboard can be kept in step with an Overleaf project, in both directions. Overleaf's Git integration comes with a paid Overleaf plan; without one, a paper can still be uploaded to Overleaf as a new project. The token stays on this machine and is not sent to compute backends.",
   "settings_page_work_dir": "Work directory",

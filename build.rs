@@ -7,6 +7,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=ORX_OFFICIAL_RELEASE_BUILD");
     println!("cargo:rerun-if-env-changed=GITHUB_ACTIONS");
     println!("cargo:rerun-if-env-changed=GITHUB_REPOSITORY");
+    println!("cargo:rerun-if-changed=UPSTREAM_VERSION");
 
     let repo = std::env::var("GITHUB_REPOSITORY").unwrap_or_default();
     let official_repo = OFFICIAL_REPOS.contains(&repo.as_str());
@@ -39,4 +40,14 @@ fn main() {
         OFFICIAL_REPOS[0]
     };
     println!("cargo:rustc-env=ORX_RELEASE_REPO=https://github.com/{release_repo}");
+
+    // The upstream release this tree is merged up to, for display only — it
+    // never enters a version comparison, so an absent or stale value costs
+    // nothing but the annotation. A source build or another fork without the
+    // file simply reports no base.
+    let upstream_base = std::fs::read_to_string("UPSTREAM_VERSION")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    println!("cargo:rustc-env=ORX_UPSTREAM_BASE={upstream_base}");
 }

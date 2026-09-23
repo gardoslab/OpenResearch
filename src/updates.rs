@@ -51,6 +51,22 @@ pub fn current_version() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).expect("CARGO_PKG_VERSION is valid semver")
 }
 
+/// The upstream release this build is merged up to, baked from `UPSTREAM_VERSION`
+/// by `build.rs`. Display only: our releases carry their own version line, and
+/// nothing here is ever compared against it, so a stale value cannot affect
+/// whether an update is offered.
+pub fn upstream_base() -> Option<&'static str> {
+    Some(env!("ORX_UPSTREAM_BASE")).filter(|base| !base.is_empty())
+}
+
+/// `orx 0.2.10 (upstream 0.2.7)`, or just the version when no base is recorded.
+pub fn version_line(version: &Version) -> String {
+    match upstream_base() {
+        Some(base) => format!("orx {version} (upstream {base})"),
+        None => format!("orx {version}"),
+    }
+}
+
 fn http() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(reqwest::Client::new)
@@ -794,6 +810,9 @@ pub const PERIODIC_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 #[serde(rename_all = "camelCase")]
 pub struct UpdateStatus {
     pub current: String,
+    /// Upstream release this build is merged up to. Annotation only — see
+    /// [`upstream_base`].
+    pub upstream_base: Option<&'static str>,
     /// Latest release this install can actually move to. `None` before the first
     /// check.
     pub latest: Option<String>,
@@ -833,6 +852,7 @@ pub fn status() -> UpdateStatus {
         .and_then(|c| Version::parse(&c.installed_version).ok())
         .filter(|installed| is_outdated(&current, installed));
     UpdateStatus {
+        upstream_base: upstream_base(),
         update_available: latest
             .as_ref()
             .is_some_and(|latest| is_outdated(&current, latest)),
@@ -1260,9 +1280,9 @@ impl UpdateWarning {
 mod tests {
     use super::{
         app_bundle_root, attempt_backoff, attempt_due, bold, detect_channel, exe_matches_prefix,
-        now_unix, package_manager_owns, parse_manifest, portable_dir, precedence, relaunch_args,
-        relaunch_target, render, retired_path, warning_for, CheckCache, InstallChannel,
-        ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
+        is_outdated, now_unix, package_manager_owns, parse_manifest, portable_dir, precedence,
+        relaunch_args, relaunch_target, render, retired_path, upstream_base, version_line,
+        warning_for, CheckCache, InstallChannel, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
     use std::ffi::OsString;
@@ -1299,6 +1319,25 @@ mod tests {
     fn bold_is_a_noop_when_disabled() {
         assert_eq!(bold("x", false), "x");
         assert_eq!(bold("x", true), "\x1b[1mx\x1b[22m");
+    }
+
+    #[test]
+    fn upstream_base_annotates_the_version_without_entering_comparison() {
+        let current = Version::parse("0.3.0").unwrap();
+        match upstream_base() {
+            Some(base) => {
+                // A recorded base must be a real version, or the annotation is
+                // noise the release PR should have caught.
+                Version::parse(base).expect("UPSTREAM_VERSION is valid semver");
+                assert_eq!(
+                    version_line(&current),
+                    format!("orx 0.3.0 (upstream {base})")
+                );
+            }
+            None => assert_eq!(version_line(&current), "orx 0.3.0"),
+        }
+        // Whatever the base says, it never moves the update decision.
+        assert!(!is_outdated(&current, &Version::parse("0.2.10").unwrap()));
     }
 
     #[test]
