@@ -63,6 +63,8 @@ same-file = "1.0"
 # IANA tz database so this resolves on a static musl build, which has no
 # /usr/share/zoneinfo to read from.
 jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
+# PubMed efetch serves abstracts only as XML.
+roxmltree = "0.21"
 
 [target.'cfg(unix)'.dependencies]
 # Free-space pre-check for the data-dir move (statvfs). Already in the tree
@@ -70,8 +72,10 @@ jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-# Win32 calls std lacks: run liveness, console ownership, the error dialog. Already in the tree.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
+# Win32 calls std lacks: run liveness, console ownership, the error dialog, PE
+# version-resource reads (GetFileVersionInfoW / VerQueryValueW — the spawn-free
+# `--version` fast path in harness detection). Already in the tree.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Credentials", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS `.app` mode (src/commands/app.rs): an NSApplication + delegate run loop
