@@ -271,6 +271,7 @@ mod tests {
                 bootstrap_context: None,
                 active_leaf_id: None,
                 parent_session_id: None,
+                goal: None,
                 created_at: 1,
                 updated_at: 1,
             })

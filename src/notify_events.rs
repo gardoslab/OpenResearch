@@ -339,6 +339,7 @@ mod tests {
             source_path: None,
             source_size: None,
             run_dir: None,
+            ssh_container: None,
         }
     }
 

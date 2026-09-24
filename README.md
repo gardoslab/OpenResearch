@@ -123,3 +123,11 @@ orx telemetry status
 ## Contributing
 
 See [AGENTS.md](AGENTS.md) for the branch flow, checks and release process.
+
+Coding agents may also file product feedback with `orx feedback` when you hit
+a bug, wish for a feature, or get frustrated with OpenResearch. Each report is
+a short description of the workflow problem, written to omit your research
+details. Like analytics, reports are sent only from official release builds.
+They are linked to your account when you are logged in and turned off by
+`orx telemetry off`. The `--no-telemetry` flag covers only the command it is
+passed to.
