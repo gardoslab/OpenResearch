@@ -694,6 +694,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/settings/slack/events", post(set_slack_events))
         .route("/api/settings/slack/preflight", post(slack_preflight))
+        .route("/api/settings/slack/digest", post(slack_send_digest))
         .route("/api/settings/compute", get(compute_settings))
         .route("/api/settings/compute/default", post(set_compute_default))
         .route("/api/settings/local", get(local_machine_settings))
@@ -5473,6 +5474,29 @@ async fn slack_preflight() -> ApiResult {
             "error": "Could not reach Slack. Check the webhook URL and try again.",
         }),
     }))
+}
+
+#[derive(Deserialize)]
+struct SlackSendDigestReq {
+    kind: String,
+}
+
+/// Settings → Slack "Send daily/weekly digest": runs every project's digest
+/// now, through the outbox like a scheduled one. A daily has been written by
+/// the time this answers; a weekly has only had its agent turn queued.
+async fn slack_send_digest(Json(req): Json<SlackSendDigestReq>) -> ApiResult {
+    if crate::config::slack_webhook_url().is_none() {
+        return Err(bad_request("No Slack webhook is saved yet."));
+    }
+    if !matches!(req.kind.as_str(), "daily" | "weekly") {
+        return Err(bad_request("kind must be daily or weekly"));
+    }
+    let report = local::chat::send_digest_now(&req.kind).await?;
+    Ok(Json(json!({
+        "sent": report.sent,
+        "skipped": report.skipped,
+        "failed": report.failed,
+    })))
 }
 
 // --- updates -----------------------------------------------------------------

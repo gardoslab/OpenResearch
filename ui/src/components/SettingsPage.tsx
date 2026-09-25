@@ -69,6 +69,7 @@ import {
   deleteSlackWebhook,
   setSlackEvents,
   slackPreflight,
+  sendSlackDigest,
   saveOverleafSession,
   saveOverleafToken,
   disableProjectGithub,
@@ -101,6 +102,7 @@ import {
   type SlackSettings,
   type SlackEvents,
   type SlackPreflightResult,
+  type SlackDigestReport,
   type Harness,
   type HarnessSetupCommands,
   type HarnessId,
@@ -3281,6 +3283,7 @@ function SlackSection() {
     });
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [sendingDigest, setSendingDigest] = useState<"daily" | "weekly" | null>(null);
   const [actionError, setError] = useState<string | null>(null);
   const error = actionError ?? settingsQuery.error?.message ?? null;
 
@@ -3314,6 +3317,28 @@ function SlackSection() {
       })
       .catch((err) => showAlert(err instanceof Error ? err.message : String(err), "error"))
       .finally(() => setTesting(false));
+  };
+
+  const sendDigest = (kind: "daily" | "weekly") => {
+    if (!settings?.hasWebhook || sendingDigest) return;
+    setSendingDigest(kind);
+    void sendSlackDigest(kind)
+      .then((report: SlackDigestReport) => {
+        if (report.failed > 0) {
+          showAlert(m.settings_page_slack_digest_failed({ count: report.failed }), "error");
+        } else if (report.sent === 0) {
+          showAlert(m.settings_page_slack_digest_nothing(), "info");
+        } else {
+          showAlert(
+            kind === "daily"
+              ? m.settings_page_slack_digest_daily_sent({ count: report.sent })
+              : m.settings_page_slack_digest_weekly_started({ count: report.sent }),
+            "success",
+          );
+        }
+      })
+      .catch((err) => showAlert(err instanceof Error ? err.message : String(err), "error"))
+      .finally(() => setSendingDigest(null));
   };
 
   return (
@@ -3414,6 +3439,12 @@ function SlackSection() {
           <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
             <Button disabled={!settings.hasWebhook || testing} onClick={runTest}>
               {testing ? m.settings_page_testing() : m.settings_page_slack_test()}
+            </Button>
+            <Button disabled={!settings.hasWebhook || sendingDigest !== null} onClick={() => sendDigest("daily")}>
+              {sendingDigest === "daily" ? m.settings_page_slack_digest_sending() : m.settings_page_slack_send_daily_digest()}
+            </Button>
+            <Button disabled={!settings.hasWebhook || sendingDigest !== null} onClick={() => sendDigest("weekly")}>
+              {sendingDigest === "weekly" ? m.settings_page_slack_digest_sending() : m.settings_page_slack_send_weekly_digest()}
             </Button>
           </div>
           {error && <div className="error">{error}</div>}

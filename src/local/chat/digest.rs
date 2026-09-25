@@ -98,35 +98,59 @@ fn due_digest(now: &Zoned, weekly: bool) -> Option<Due> {
     if matches!(weekday, Weekday::Saturday | Weekday::Sunday) || now.hour() < DIGEST_HOUR {
         return None;
     }
-    let today = now.date();
-    let monday = today
-        .checked_sub(jiff::Span::new().days(weekday.to_monday_zero_offset()))
-        .ok()?;
-    let midnight = |date: jiff::civil::Date| {
-        date.to_zoned(now.time_zone().clone())
-            .ok()
-            .map(|z| z.timestamp().as_millisecond())
-    };
     if weekday == Weekday::Monday && weekly {
-        let last_monday = monday.checked_sub(jiff::Span::new().days(7)).ok()?;
-        return Some(Due {
-            kind: DigestKind::Weekly,
-            period: monday.to_string(),
-            title: format!(
-                "Weekly digest \u{b7} week of {}",
-                last_monday.strftime("%b %-d")
-            ),
-            window_start_ms: midnight(last_monday)?,
-            window_end_ms: midnight(monday)?,
-        });
+        weekly_due_at(now)
+    } else {
+        daily_due_at(now)
     }
+}
+
+fn this_monday(now: &Zoned) -> Option<jiff::civil::Date> {
+    now.date()
+        .checked_sub(jiff::Span::new().days(now.weekday().to_monday_zero_offset()))
+        .ok()
+}
+
+fn midnight_ms(now: &Zoned, date: jiff::civil::Date) -> Option<i64> {
+    date.to_zoned(now.time_zone().clone())
+        .ok()
+        .map(|z| z.timestamp().as_millisecond())
+}
+
+/// Today's daily digest, covering this week so far — whatever day it is.
+fn daily_due_at(now: &Zoned) -> Option<Due> {
+    let today = now.date();
     Some(Due {
         kind: DigestKind::Daily,
         period: today.to_string(),
         title: format!("Daily digest \u{b7} {}", today.strftime("%a %b %-d")),
-        window_start_ms: midnight(monday)?,
+        window_start_ms: midnight_ms(now, this_monday(now)?)?,
         window_end_ms: now.timestamp().as_millisecond(),
     })
+}
+
+/// The weekly digest for the last full week (the one before this Monday).
+fn weekly_due_at(now: &Zoned) -> Option<Due> {
+    let monday = this_monday(now)?;
+    let last_monday = monday.checked_sub(jiff::Span::new().days(7)).ok()?;
+    Some(Due {
+        kind: DigestKind::Weekly,
+        period: monday.to_string(),
+        title: format!(
+            "Weekly digest \u{b7} week of {}",
+            last_monday.strftime("%b %-d")
+        ),
+        window_start_ms: midnight_ms(now, last_monday)?,
+        window_end_ms: midnight_ms(now, monday)?,
+    })
+}
+
+/// A "Send now" from Settings: the same digest, under its own period so it
+/// neither blocks nor is blocked by the scheduled one. The suffix after `#`
+/// is ignored when a weekly period is read back ([`weekly_due_for`]).
+fn manual(mut due: Due) -> Due {
+    due.period = format!("{}#manual-{}", due.period, now_ms());
+    due
 }
 
 /// Everything a digest is written from, already rendered as plain text.
@@ -331,6 +355,18 @@ pub async fn watch_digests(
     }
 }
 
+/// What one project's digest attempt came to, for the Settings "Send now".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// Posted (daily) or its agent turn queued (weekly).
+    Sent,
+    /// Nothing to report for this project.
+    Skipped,
+    /// Already claimed, by an earlier tick or a concurrent one.
+    Claimed,
+    Failed,
+}
+
 async fn tick(chat: &Arc<ChatHost>, now: &Zoned) -> Result<()> {
     let due = due_digest(now, DigestKind::Weekly.enabled());
     if let Some(due) = due.filter(|due| due.kind.enabled()) {
@@ -339,26 +375,26 @@ async fn tick(chat: &Arc<ChatHost>, now: &Zoned) -> Result<()> {
             match due.kind {
                 DigestKind::Daily => daily(&project, &due).await?,
                 DigestKind::Weekly => start_weekly(&project, &due).await?,
-            }
+            };
         }
     }
     advance_weekly(chat).await
 }
 
-async fn daily(project: &LocalProject, due: &Due) -> Result<()> {
+async fn daily(project: &LocalProject, due: &Due) -> Result<Outcome> {
     let kind = DigestKind::Daily.as_str();
     let (row, context) = {
         let store = Store::open()?;
         let row = match store.get_digest(&project.id, kind, &due.period)? {
             None => None,
             Some(row) if row.state == "pending" => Some(row),
-            Some(_) => return Ok(()),
+            Some(_) => return Ok(Outcome::Claimed),
         };
         let context = gather(&store, project, due, &store.digest_session_ids()?)?;
         let row = match row {
             Some(row) => {
                 if !store.set_digest_state(&row, "pending", "running")? {
-                    return Ok(());
+                    return Ok(Outcome::Claimed);
                 }
                 row
             }
@@ -368,10 +404,11 @@ async fn daily(project: &LocalProject, due: &Due) -> Result<()> {
                 } else {
                     "running"
                 };
-                if !store.claim_digest(&project.id, kind, &due.period, state, None)?
-                    || context.is_empty()
-                {
-                    return Ok(());
+                if !store.claim_digest(&project.id, kind, &due.period, state, None)? {
+                    return Ok(Outcome::Claimed);
+                }
+                if context.is_empty() {
+                    return Ok(Outcome::Skipped);
                 }
                 store
                     .get_digest(&project.id, kind, &due.period)?
@@ -410,6 +447,7 @@ async fn daily(project: &LocalProject, due: &Due) -> Result<()> {
                 &text,
             )?;
             store.set_digest_state(&row, "running", "done")?;
+            Ok(Outcome::Sent)
         }
         None => {
             let attempts = store.record_digest_attempt(&row)?;
@@ -423,34 +461,34 @@ async fn daily(project: &LocalProject, due: &Due) -> Result<()> {
                 "orx up: daily digest for {} failed (attempt {attempts})",
                 project.name
             );
+            Ok(Outcome::Failed)
         }
     }
-    Ok(())
 }
 
 /// Create the weekly digest's session and row together; the turn itself
 /// starts in [`advance_weekly`], through the same claim-guarded path spawns
 /// use.
-async fn start_weekly(project: &LocalProject, due: &Due) -> Result<()> {
+async fn start_weekly(project: &LocalProject, due: &Due) -> Result<Outcome> {
     let kind = DigestKind::Weekly.as_str();
     {
         let store = Store::open()?;
         if store.get_digest(&project.id, kind, &due.period)?.is_some() {
-            return Ok(());
+            return Ok(Outcome::Claimed);
         }
         let context = gather(&store, project, due, &store.digest_session_ids()?)?;
         if context.is_empty() {
             store.claim_digest(&project.id, kind, &due.period, "skipped", None)?;
-            return Ok(());
+            return Ok(Outcome::Skipped);
         }
     }
     let Some(agent) = crate::local::starter::resolve_agent().await else {
-        return Ok(());
+        return Ok(Outcome::Failed);
     };
     let store = Store::open()?;
     // Re-checked: `resolve_agent` awaited, and another tick may have won.
     if store.get_digest(&project.id, kind, &due.period)?.is_some() {
-        return Ok(());
+        return Ok(Outcome::Claimed);
     }
     // Nobody watches this turn, so it must not stop on a permission prompt.
     let permission_mode =
@@ -488,7 +526,7 @@ async fn start_weekly(project: &LocalProject, due: &Due) -> Result<()> {
     store.create_chat_session(&session)?;
     store.claim_digest(&project.id, kind, &due.period, "pending", Some(&session.id))?;
     tx.commit()?;
-    Ok(())
+    Ok(Outcome::Sent)
 }
 
 /// Start pending weekly turns; post the ones that have finished.
@@ -590,15 +628,60 @@ async fn advance_weekly(chat: &Arc<ChatHost>) -> Result<()> {
     Ok(())
 }
 
+/// Counts from a "Send now", returned to Settings.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SendNowReport {
+    pub sent: usize,
+    pub skipped: usize,
+    pub failed: usize,
+}
+
+/// Settings → Slack "Send now": every project's digest of `kind` (`daily` or
+/// `weekly`) right away, regardless of the day, the hour, or the toggles —
+/// the click is the opt-in. A daily is posted before this returns (the
+/// drainer sends it within seconds); a weekly only has its agent turn queued,
+/// and posts once that turn finishes (`watch_digests` runs it).
+pub async fn send_digest_now(kind: &str) -> Result<SendNowReport> {
+    let now = Zoned::now();
+    let due = match kind {
+        "daily" => daily_due_at(&now),
+        "weekly" => weekly_due_at(&now),
+        other => return Err(crate::error::anyhow!("unknown digest kind: {other}")),
+    }
+    .map(manual)
+    .ok_or_else(|| crate::error::anyhow!("could not work out this week's dates"))?;
+    let mut report = SendNowReport::default();
+    for project in Store::open()?.list_local_projects()? {
+        let outcome = match due.kind {
+            DigestKind::Daily => daily(&project, &due).await?,
+            DigestKind::Weekly => start_weekly(&project, &due).await?,
+        };
+        match outcome {
+            Outcome::Sent => report.sent += 1,
+            Outcome::Skipped | Outcome::Claimed => report.skipped += 1,
+            Outcome::Failed => report.failed += 1,
+        }
+    }
+    Ok(report)
+}
+
 /// Rebuild a weekly `Due` from its stored period (that week's Monday), so a
 /// turn started on one tick is prompted and titled the same on a later one.
 fn weekly_due_for(period: &str) -> Option<Due> {
-    let monday: jiff::civil::Date = period.parse().ok()?;
+    let (date, suffix) = match period.split_once('#') {
+        Some((date, suffix)) => (date, Some(suffix)),
+        None => (period, None),
+    };
+    let monday: jiff::civil::Date = date.parse().ok()?;
     let at = monday
         .at(DIGEST_HOUR, 0, 0, 0)
         .to_zoned(jiff::tz::TimeZone::system())
         .ok()?;
-    due_digest(&at, true).filter(|due| due.kind == DigestKind::Weekly)
+    let mut due = due_digest(&at, true).filter(|due| due.kind == DigestKind::Weekly)?;
+    if let Some(suffix) = suffix {
+        due.period = format!("{}#{suffix}", due.period);
+    }
+    Some(due)
 }
 
 #[cfg(test)]
@@ -671,6 +754,23 @@ mod tests {
         assert_eq!(due.period, "2026-09-28");
         assert_eq!(due.title, "Weekly digest \u{b7} week of Sep 21");
         assert!(weekly_due_for("2026-09-29").is_none());
+    }
+
+    #[test]
+    fn a_manual_digest_gets_its_own_period_and_keeps_its_window() {
+        let tuesday = at("2026-09-29T15:00[America/New_York]");
+        let weekly = manual(weekly_due_at(&tuesday).unwrap());
+        assert!(weekly.period.starts_with("2026-09-28#manual-"));
+        let rebuilt = weekly_due_for(&weekly.period).unwrap();
+        assert_eq!(rebuilt.period, weekly.period);
+        assert_eq!(rebuilt.window_start_ms, weekly.window_start_ms);
+        assert_eq!(rebuilt.title, "Weekly digest \u{b7} week of Sep 21");
+
+        let saturday = at("2026-10-03T08:00[America/New_York]");
+        assert_eq!(due_digest(&saturday, true), None);
+        let daily = manual(daily_due_at(&saturday).unwrap());
+        assert!(daily.period.starts_with("2026-10-03#manual-"));
+        assert_eq!(daily.title, "Daily digest \u{b7} Sat Oct 3");
     }
 
     #[test]

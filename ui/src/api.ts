@@ -1611,6 +1611,16 @@ export const deleteSlackWebhook = () =>
 export const setSlackEvents = (events: SlackEvents) =>
   post<SlackEvents>("/api/settings/slack/events", events);
 
+export interface SlackDigestReport {
+  sent: number;
+  skipped: number;
+  failed: number;
+}
+
+/** Runs every project's daily or weekly digest now. A weekly only starts its agent turn here. */
+export const sendSlackDigest = (kind: "daily" | "weekly") =>
+  post<SlackDigestReport>("/api/settings/slack/digest", { kind });
+
 /** Sends a real test message to the currently saved webhook. */
 export const slackPreflight = () => post<SlackPreflightResult>("/api/settings/slack/preflight");
 

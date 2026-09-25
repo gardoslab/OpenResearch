@@ -11,7 +11,7 @@
 mod digest;
 pub mod mentions;
 
-pub use digest::watch_digests;
+pub use digest::{send_digest_now, watch_digests};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
