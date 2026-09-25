@@ -213,7 +213,7 @@ mod tests {
     async fn a_sent_notification_leaves_the_pending_list() {
         let dir = temp_dir();
         open(&dir)
-            .enqueue_notification("job_submitted", "{\"text\":\"hello\"}")
+            .enqueue_notification("job_submitted", None, "{\"text\":\"hello\"}")
             .unwrap();
         let provider = ScriptedProvider::new(vec![]);
 
@@ -234,7 +234,7 @@ mod tests {
     async fn a_retryable_failure_stays_pending_for_the_next_drain_pass() {
         let dir = temp_dir();
         let id = open(&dir)
-            .enqueue_notification("run_synthesized", "{\"text\":\"done\"}")
+            .enqueue_notification("run_synthesized", None, "{\"text\":\"done\"}")
             .unwrap();
         let provider = ScriptedProvider::new(vec![DeliveryOutcome::Retryable]);
 
@@ -255,7 +255,7 @@ mod tests {
     async fn a_notification_stops_being_attempted_after_max_attempts() {
         let dir = temp_dir();
         open(&dir)
-            .enqueue_notification("job_submitted", "{\"text\":\"x\"}")
+            .enqueue_notification("job_submitted", None, "{\"text\":\"x\"}")
             .unwrap();
         let provider = ScriptedProvider::new(vec![
             DeliveryOutcome::Retryable,
@@ -280,7 +280,7 @@ mod tests {
     async fn an_unparseable_payload_is_recorded_and_not_retried_forever() {
         let dir = temp_dir();
         open(&dir)
-            .enqueue_notification("job_submitted", "not json")
+            .enqueue_notification("job_submitted", None, "not json")
             .unwrap();
         let provider = ScriptedProvider::new(vec![]);
 

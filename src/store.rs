@@ -662,6 +662,7 @@ impl Store {
             "ALTER TABLE chat_turns ADD COLUMN resume_at INTEGER",
             "ALTER TABLE chat_run_wakeups ADD COLUMN turn_id TEXT",
             "ALTER TABLE chat_run_wakeups ADD COLUMN pre_turn_description TEXT",
+            "ALTER TABLE notifications_outbox ADD COLUMN run_id TEXT",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -1392,15 +1393,33 @@ impl Store {
     /// Queue a notification (e.g. a Slack message) for delivery by whatever
     /// process drains the outbox. Durable and process-independent: a
     /// detached `orx supervise` can enqueue one exactly like `orx up` can.
+    /// `run_id` tags the run it is about, when it is about one, so a later
+    /// caller can ask when that run last produced one of this `kind`.
     /// Returns the row's generated id.
-    pub fn enqueue_notification(&self, kind: &str, payload_json: &str) -> Result<String> {
+    pub fn enqueue_notification(
+        &self,
+        kind: &str,
+        run_id: Option<&str>,
+        payload_json: &str,
+    ) -> Result<String> {
         let id = format!("notif_{}", uuid::Uuid::new_v4());
         self.conn.execute(
-            "INSERT INTO notifications_outbox (id, created_at, kind, payload_json)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![id, now_ms(), kind, payload_json],
+            "INSERT INTO notifications_outbox (id, created_at, kind, payload_json, run_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, now_ms(), kind, payload_json, run_id],
         )?;
         Ok(id)
+    }
+
+    /// When `run_id` last had a `kind` notification enqueued, sent or not.
+    /// Lives in the outbox rather than in a supervisor's memory so a throttle
+    /// built on it survives the supervisor being restarted.
+    pub fn last_run_notification_at(&self, kind: &str, run_id: &str) -> Result<Option<i64>> {
+        Ok(self.conn.query_row(
+            "SELECT MAX(created_at) FROM notifications_outbox WHERE kind = ?1 AND run_id = ?2",
+            params![kind, run_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?)
     }
 
     /// Unsent notifications, oldest first, for the drainer to attempt.
@@ -5502,7 +5521,7 @@ mod tests {
         let store = Store::open_at(dir.clone()).unwrap();
 
         let id = store
-            .enqueue_notification("job_submitted", "{\"runId\":\"run_1\"}")
+            .enqueue_notification("job_submitted", None, "{\"runId\":\"run_1\"}")
             .unwrap();
         let pending = store.list_pending_notifications(10).unwrap();
         assert_eq!(pending.len(), 1);
@@ -5519,6 +5538,42 @@ mod tests {
 
         store.mark_notification_sent(&id).unwrap();
         assert_eq!(store.list_pending_notifications(10).unwrap().len(), 0);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn last_run_notification_at_is_scoped_by_kind_and_run() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-notify-run-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        assert_eq!(
+            store
+                .last_run_notification_at("run_stalled", "run_1")
+                .unwrap(),
+            None
+        );
+        store
+            .enqueue_notification("run_stalled", Some("run_1"), "{}")
+            .unwrap();
+        assert!(store
+            .last_run_notification_at("run_stalled", "run_1")
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            store
+                .last_run_notification_at("run_stalled", "run_2")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .last_run_notification_at("job_submitted", "run_1")
+                .unwrap(),
+            None
+        );
 
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
