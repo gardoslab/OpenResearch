@@ -94,6 +94,12 @@ fn header_line(
     }
 }
 
+/// The least a stalled run waits between Slack pings. Each stall trigger
+/// already fires once per episode, but a job whose log ticks just past the
+/// silence threshold, or an SSH session that keeps dropping, starts a new
+/// episode every time — and a restarted supervisor forgets the old one.
+const RUN_STALLED_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
+
 /// Slack's `mrkdwn` section text tops out well under this; a wake-up's
 /// closing reply is already capped at `SPAWN_REPORT_LIMIT` (4000 chars) by
 /// `chat::spawn_outcome`, which alone can still overflow Slack's ~3000-char
@@ -147,7 +153,7 @@ pub fn enqueue_job_submitted(
     let ordinal = run_ordinal(store, &experiment.id, &run.id)?;
     let header = header_line(
         &project.name,
-        experiment.display_name(),
+        &format!("Launching experiment run: {}", experiment.display_name()),
         ordinal,
         descriptor.job_label().as_deref(),
     );
@@ -162,6 +168,7 @@ pub fn enqueue_job_submitted(
     }
     store.enqueue_notification(
         "job_submitted",
+        Some(&run.id),
         &payload(&header, &details.join("\n")).to_string(),
     )?;
     Ok(())
@@ -210,6 +217,7 @@ pub fn enqueue_run_synthesized(
     }
     store.enqueue_notification(
         "run_synthesized",
+        Some(&run.id),
         &payload(&header, &details.join("\n\n")).to_string(),
     )?;
     Ok(())
@@ -221,7 +229,9 @@ pub fn enqueue_run_synthesized(
 /// (Eqw) job, a stalled SSH session to the cluster, or a job gone quiet
 /// while still marked running. Unlike `enqueue_run_synthesized`, this never
 /// waits on the run reaching a terminal state, because a stuck run may not.
-/// A no-op unless `slack_events.run_stalled` is on and a webhook is saved.
+/// A no-op unless `slack_events.run_stalled` is on and a webhook is saved,
+/// and also while this run's previous stall ping is younger than
+/// `RUN_STALLED_MIN_INTERVAL`.
 pub fn enqueue_run_stalled(
     store: &Store,
     project: &LocalProject,
@@ -232,6 +242,11 @@ pub fn enqueue_run_stalled(
 ) -> Result<()> {
     if !slack_ready(crate::telemetry::slack_event_settings().run_stalled) {
         return Ok(());
+    }
+    if let Some(last) = store.last_run_notification_at("run_stalled", &run.id)? {
+        if crate::store::now_ms() - last < RUN_STALLED_MIN_INTERVAL.as_millis() as i64 {
+            return Ok(());
+        }
     }
     let ordinal = run_ordinal(store, &experiment.id, &run.id)?;
     let header = header_line(
@@ -251,6 +266,7 @@ pub fn enqueue_run_stalled(
     }
     store.enqueue_notification(
         "run_stalled",
+        Some(&run.id),
         &payload(&header, &details.join("\n\n")).to_string(),
     )?;
     Ok(())
@@ -390,8 +406,10 @@ mod tests {
             assert_eq!(pending.len(), 1);
             assert_eq!(pending[0].kind, "job_submitted");
             let payload: Value = serde_json::from_str(&pending[0].payload_json).unwrap();
-            assert!(payload["text"].as_str().unwrap().contains("My Project"));
-            assert!(payload["text"].as_str().unwrap().contains("Run 1"));
+            assert_eq!(
+                payload["text"].as_str().unwrap(),
+                "[My Project] Launching experiment run: Baseline \u{b7} Run 1 \u{b7} SGE 12345 @ login1\n\nCommand: `python train.py`"
+            );
             drop(store);
             let _ = std::fs::remove_dir_all(dir);
         });
@@ -507,6 +525,40 @@ mod tests {
             assert!(text.contains("Baseline"), "{text}");
             assert!(text.contains("SGE 12345 @ login1"), "{text}");
             assert!(text.contains("Eqw"), "{text}");
+            drop(store);
+            let _ = std::fs::remove_dir_all(dir);
+        });
+    }
+
+    #[test]
+    fn run_stalled_pings_a_run_at_most_once_per_interval() {
+        with_isolated_config_dir(|| {
+            crate::config::set_slack_webhook_url("https://hooks.slack.com/services/T0/B0/xyz")
+                .unwrap();
+            let dir = store_dir("run-stalled-throttled");
+            let store = Store::open_at(dir.clone()).unwrap();
+            let r = run();
+            store.upsert_run(&r).unwrap();
+            let mut other = run();
+            other.id = "run_2".into();
+            store.upsert_run(&other).unwrap();
+
+            let stall = |run: &StoredRun, reason: &str| {
+                enqueue_run_stalled(
+                    &store,
+                    &project(),
+                    &experiment(),
+                    run,
+                    &descriptor(),
+                    reason,
+                )
+                .unwrap()
+            };
+            stall(&r, "No new job output.");
+            stall(&r, "orx lost its SSH session.");
+            stall(&other, "No new job output.");
+            assert_eq!(store.list_pending_notifications(10).unwrap().len(), 2);
+
             drop(store);
             let _ = std::fs::remove_dir_all(dir);
         });

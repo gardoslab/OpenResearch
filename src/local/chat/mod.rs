@@ -7758,7 +7758,10 @@ fn run_wakeup_text(run: &crate::store::StoredRun) -> Option<String> {
     matches!(run.status.as_str(), "done" | "failed").then(|| {
         format!(
             "[orx] Run `{}` finished with status **{}**. You can compare this result with other \
-             project runs using `orx runs {}` and inspect this run's logs using `orx logs {}`.",
+             project runs using `orx runs {}` and inspect this run's logs using `orx logs {}`. \
+             End your reply with a short, plain summary of what was run and what the result \
+             was, in a few sentences — no preamble, no fluff, no incidental detail. That \
+             closing summary is what gets posted to Slack.",
             run.id, run.status, run.project_id, run.id
         )
     })
@@ -7938,6 +7941,59 @@ enum SpawnOutcome {
 /// only the last assistant row: an answered prompt card rides its own
 /// text-less assistant message and would otherwise mask the real reply.
 fn spawn_outcome(store: &Store, session: &StoredChatSession) -> Result<SpawnOutcome> {
+    closing_outcome(store, session, all_text)
+}
+
+/// Every text part of a message — the whole reply, narration included.
+fn all_text(parts: &[WirePart]) -> String {
+    parts
+        .iter()
+        .filter(|part| part.kind == "text")
+        .filter_map(|part| part.text.as_deref())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Only the answer a message closes on, not the working-out on the way to it.
+/// A harness that tags its phases (Codex) says which text is the final
+/// answer; otherwise it is the text after the message's last tool call or
+/// prompt card, since anything before that is the agent narrating its steps.
+fn final_answer_text(parts: &[WirePart]) -> String {
+    let join = |parts: &[&WirePart]| {
+        parts
+            .iter()
+            .filter_map(|part| part.text.as_deref())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    let tagged: Vec<&WirePart> = parts
+        .iter()
+        .filter(|part| part.kind == "text" && part.phase == Some(MessagePhase::FinalAnswer))
+        .collect();
+    if !tagged.is_empty() {
+        return join(&tagged);
+    }
+    let after_last_step = parts
+        .iter()
+        .rposition(|part| matches!(part.kind.as_str(), "tool" | "prompt"))
+        .map_or(0, |idx| idx + 1);
+    let trailing: Vec<&WirePart> = parts[after_last_step..]
+        .iter()
+        .filter(|part| part.kind == "text")
+        .collect();
+    join(&trailing)
+}
+
+/// [`spawn_outcome`], with the reply text taken by `extract`.
+fn closing_outcome(
+    store: &Store,
+    session: &StoredChatSession,
+    extract: fn(&[WirePart]) -> String,
+) -> Result<SpawnOutcome> {
     let messages = store.list_chat_messages(&session.id)?;
     let path = active_path(&messages, session.active_leaf_id.as_deref());
     let mut failure = None;
@@ -7953,14 +8009,7 @@ fn spawn_outcome(store: &Store, session: &StoredChatSession) -> Result<SpawnOutc
         {
             return Ok(SpawnOutcome::Interrupted);
         }
-        let text = parts
-            .iter()
-            .filter(|part| part.kind == "text")
-            .filter_map(|part| part.text.as_deref())
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let text = extract(&parts);
         if !text.is_empty() {
             return Ok(SpawnOutcome::Reply(truncated(&text, SPAWN_REPORT_LIMIT)));
         }
@@ -7999,7 +8048,9 @@ fn notify_run_synthesized_if_wakeup_turn(store: &Store, turn_id: &str) {
     let Ok(Some(experiment)) = store.get_local_experiment(&wakeup.run.experiment_id) else {
         return;
     };
-    let outcome_text = match spawn_outcome(store, &session) {
+    // Slack gets the closing summary alone — not the agent's reasoning or the
+    // narration between its tool calls.
+    let outcome_text = match closing_outcome(store, &session, final_answer_text) {
         Ok(SpawnOutcome::Reply(text)) => Some(text),
         Ok(SpawnOutcome::Failed(text)) => Some(format!("Agent reported an error:\n{text}")),
         Ok(SpawnOutcome::Interrupted) => {
@@ -9994,17 +10045,51 @@ mod run_wakeup_tests {
             run_wakeup_text(&run("done")).as_deref(),
             Some(
                 "[orx] Run `run_x` finished with status **done**. You can compare this result \
-with other project runs using `orx runs p1` and inspect this run's logs using `orx logs run_x`."
+with other project runs using `orx runs p1` and inspect this run's logs using `orx logs run_x`. End your reply with a short, plain summary \
+of what was run and what the result was, in a few sentences — no preamble, no fluff, no \
+incidental detail. That closing summary is what gets posted to Slack."
             )
         );
         assert_eq!(
             run_wakeup_text(&run("failed")).as_deref(),
             Some(
                 "[orx] Run `run_x` finished with status **failed**. You can compare this result \
-with other project runs using `orx runs p1` and inspect this run's logs using `orx logs run_x`."
+with other project runs using `orx runs p1` and inspect this run's logs using `orx logs run_x`. End your reply with a short, plain summary \
+of what was run and what the result was, in a few sentences — no preamble, no fluff, no \
+incidental detail. That closing summary is what gets posted to Slack."
             )
         );
         assert!(run_wakeup_text(&run("cancelled")).is_none());
+    }
+
+    #[test]
+    fn final_answer_text_drops_reasoning_and_narration() {
+        let tool: WirePart =
+            serde_json::from_value(serde_json::json!({"id": "t1", "type": "tool", "tool": "bash"}))
+                .unwrap();
+        let parts = vec![
+            WirePart::reasoning("r1", "thinking it over"),
+            WirePart::text("x1", "Let me check the logs."),
+            tool,
+            WirePart::reasoning("r2", "looks fine"),
+            WirePart::text("x2", "Ran the pilot; val acc 81%."),
+        ];
+        assert_eq!(final_answer_text(&parts), "Ran the pilot; val acc 81%.");
+        assert!(all_text(&parts).contains("Let me check the logs."));
+
+        let mut commentary = WirePart::text("c1", "Checking the logs.");
+        commentary.phase = Some(MessagePhase::Commentary);
+        let mut answer = WirePart::text("a1", "The run finished cleanly.");
+        answer.phase = Some(MessagePhase::FinalAnswer);
+        assert_eq!(
+            final_answer_text(&[commentary, answer]),
+            "The run finished cleanly."
+        );
+
+        assert_eq!(
+            final_answer_text(&[WirePart::text("only", "Just an answer.")]),
+            "Just an answer."
+        );
     }
 
     fn assistant_message(id: &str, parent: Option<&str>, text: &str) -> StoredChatMessage {
