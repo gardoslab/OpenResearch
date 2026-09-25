@@ -272,6 +272,22 @@ pub fn enqueue_run_stalled(
     Ok(())
 }
 
+/// Enqueue one project's digest. `kind` is the outbox tag (`digest_daily` /
+/// `digest_weekly`), `title` the header after the project name, `text` the
+/// model's Slack-mrkdwn body. Gated by the caller (`local::chat::digest`),
+/// which checks the per-digest toggle before spending a model call at all.
+pub fn enqueue_digest(
+    store: &Store,
+    project: &LocalProject,
+    kind: &str,
+    title: &str,
+    text: &str,
+) -> Result<()> {
+    let header = format!("[{}] {title}", project.name);
+    store.enqueue_notification(kind, None, &payload(&header, text.trim()).to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

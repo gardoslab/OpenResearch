@@ -1584,7 +1584,15 @@ export const setTelemetry = (enabled: boolean) =>
 export interface SlackSettings {
   /** Whether a webhook URL is saved; the URL itself is never echoed back. */
   hasWebhook: boolean;
-  events: { jobSubmitted: boolean; runSynthesized: boolean; runStalled: boolean };
+  events: SlackEvents;
+}
+
+export interface SlackEvents {
+  jobSubmitted: boolean;
+  runSynthesized: boolean;
+  runStalled: boolean;
+  dailyDigest: boolean;
+  weeklyDigest: boolean;
 }
 
 export interface SlackPreflightResult {
@@ -1600,8 +1608,18 @@ export const saveSlackWebhook = (webhookUrl: string) =>
 export const deleteSlackWebhook = () =>
   writeResponse("/api/settings/slack", { method: "DELETE" }).then((r) => json<{ hasWebhook: boolean }>(r));
 
-export const setSlackEvents = (events: { jobSubmitted: boolean; runSynthesized: boolean; runStalled: boolean }) =>
-  post<{ jobSubmitted: boolean; runSynthesized: boolean; runStalled: boolean }>("/api/settings/slack/events", events);
+export const setSlackEvents = (events: SlackEvents) =>
+  post<SlackEvents>("/api/settings/slack/events", events);
+
+export interface SlackDigestReport {
+  sent: number;
+  skipped: number;
+  failed: number;
+}
+
+/** Runs every project's daily or weekly digest now. A weekly only starts its agent turn here. */
+export const sendSlackDigest = (kind: "daily" | "weekly") =>
+  post<SlackDigestReport>("/api/settings/slack/digest", { kind });
 
 /** Sends a real test message to the currently saved webhook. */
 export const slackPreflight = () => post<SlackPreflightResult>("/api/settings/slack/preflight");

@@ -198,6 +198,10 @@ pub async fn run(args: UpArgs) -> Result<()> {
         crate::notify::spawn_notifier_loop(std::sync::Arc::new(
             crate::notify::SlackWebhookProvider::new(webhook_url),
         ));
+        tokio::spawn(local::chat::watch_digests(
+            state.chat.clone(),
+            state.data_dir_move_in_progress.clone(),
+        ));
     }
     spawn_claude_auth_monitor(state.chat.clone(), claude.clone());
     spawn_background_tasks(remote_auth.is_none());
@@ -690,6 +694,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/settings/slack/events", post(set_slack_events))
         .route("/api/settings/slack/preflight", post(slack_preflight))
+        .route("/api/settings/slack/digest", post(slack_send_digest))
         .route("/api/settings/compute", get(compute_settings))
         .route("/api/settings/compute/default", post(set_compute_default))
         .route("/api/settings/local", get(local_machine_settings))
@@ -5366,6 +5371,8 @@ fn slack_settings_json() -> Value {
             "jobSubmitted": events.job_submitted,
             "runSynthesized": events.run_synthesized,
             "runStalled": events.run_stalled,
+            "dailyDigest": events.daily_digest,
+            "weeklyDigest": events.weekly_digest,
         },
     })
 }
@@ -5418,6 +5425,8 @@ struct SetSlackEventsReq {
     job_submitted: bool,
     run_synthesized: bool,
     run_stalled: bool,
+    daily_digest: bool,
+    weekly_digest: bool,
 }
 
 async fn set_slack_events(Json(req): Json<SetSlackEventsReq>) -> ApiResult {
@@ -5426,12 +5435,16 @@ async fn set_slack_events(Json(req): Json<SetSlackEventsReq>) -> ApiResult {
             job_submitted: req.job_submitted,
             run_synthesized: req.run_synthesized,
             run_stalled: req.run_stalled,
+            daily_digest: req.daily_digest,
+            weekly_digest: req.weekly_digest,
         })
         .map_err(|e| ApiError::from(anyhow!("could not save slack event settings: {e}")))?;
         Ok(Json(json!({
             "jobSubmitted": req.job_submitted,
             "runSynthesized": req.run_synthesized,
             "runStalled": req.run_stalled,
+            "dailyDigest": req.daily_digest,
+            "weeklyDigest": req.weekly_digest,
         })))
     })
     .await
@@ -5461,6 +5474,29 @@ async fn slack_preflight() -> ApiResult {
             "error": "Could not reach Slack. Check the webhook URL and try again.",
         }),
     }))
+}
+
+#[derive(Deserialize)]
+struct SlackSendDigestReq {
+    kind: String,
+}
+
+/// Settings → Slack "Send daily/weekly digest": runs every project's digest
+/// now, through the outbox like a scheduled one. A daily has been written by
+/// the time this answers; a weekly has only had its agent turn queued.
+async fn slack_send_digest(Json(req): Json<SlackSendDigestReq>) -> ApiResult {
+    if crate::config::slack_webhook_url().is_none() {
+        return Err(bad_request("No Slack webhook is saved yet."));
+    }
+    if !matches!(req.kind.as_str(), "daily" | "weekly") {
+        return Err(bad_request("kind must be daily or weekly"));
+    }
+    let report = local::chat::send_digest_now(&req.kind).await?;
+    Ok(Json(json!({
+        "sent": report.sent,
+        "skipped": report.skipped,
+        "failed": report.failed,
+    })))
 }
 
 // --- updates -----------------------------------------------------------------

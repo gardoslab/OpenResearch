@@ -213,6 +213,14 @@ pub(crate) struct SlackEventSettings {
     /// own.
     #[serde(default = "default_true")]
     pub run_stalled: bool,
+    /// Weekday-morning per-project digest: runs in flight and the next steps
+    /// this week's chats left open (`local::chat::digest`).
+    #[serde(default = "default_true")]
+    pub daily_digest: bool,
+    /// Monday-morning per-project digest: last week's progress, open next
+    /// steps, and an agent-searched roundup of relevant new work.
+    #[serde(default = "default_true")]
+    pub weekly_digest: bool,
 }
 
 impl Default for SlackEventSettings {
@@ -221,6 +229,8 @@ impl Default for SlackEventSettings {
             job_submitted: true,
             run_synthesized: true,
             run_stalled: true,
+            daily_digest: true,
+            weekly_digest: true,
         }
     }
 }
