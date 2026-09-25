@@ -87,7 +87,7 @@ pub struct Agent {
 impl Agent {
     /// The model as far as the harness's one-shot cares: dropped for a
     /// harness that ignores it.
-    fn effective_model(&self) -> Option<&str> {
+    pub(crate) fn effective_model(&self) -> Option<&str> {
         let honours =
             super::harness::chat_harness(&self.harness).is_some_and(|h| h.one_shot_honours_model());
         honours.then_some(self.model.as_deref()).flatten()

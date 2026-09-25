@@ -198,6 +198,10 @@ pub async fn run(args: UpArgs) -> Result<()> {
         crate::notify::spawn_notifier_loop(std::sync::Arc::new(
             crate::notify::SlackWebhookProvider::new(webhook_url),
         ));
+        tokio::spawn(local::chat::watch_digests(
+            state.chat.clone(),
+            state.data_dir_move_in_progress.clone(),
+        ));
     }
     spawn_claude_auth_monitor(state.chat.clone(), claude.clone());
     spawn_background_tasks(remote_auth.is_none());
@@ -5366,6 +5370,8 @@ fn slack_settings_json() -> Value {
             "jobSubmitted": events.job_submitted,
             "runSynthesized": events.run_synthesized,
             "runStalled": events.run_stalled,
+            "dailyDigest": events.daily_digest,
+            "weeklyDigest": events.weekly_digest,
         },
     })
 }
@@ -5418,6 +5424,8 @@ struct SetSlackEventsReq {
     job_submitted: bool,
     run_synthesized: bool,
     run_stalled: bool,
+    daily_digest: bool,
+    weekly_digest: bool,
 }
 
 async fn set_slack_events(Json(req): Json<SetSlackEventsReq>) -> ApiResult {
@@ -5426,12 +5434,16 @@ async fn set_slack_events(Json(req): Json<SetSlackEventsReq>) -> ApiResult {
             job_submitted: req.job_submitted,
             run_synthesized: req.run_synthesized,
             run_stalled: req.run_stalled,
+            daily_digest: req.daily_digest,
+            weekly_digest: req.weekly_digest,
         })
         .map_err(|e| ApiError::from(anyhow!("could not save slack event settings: {e}")))?;
         Ok(Json(json!({
             "jobSubmitted": req.job_submitted,
             "runSynthesized": req.run_synthesized,
             "runStalled": req.run_stalled,
+            "dailyDigest": req.daily_digest,
+            "weeklyDigest": req.weekly_digest,
         })))
     })
     .await

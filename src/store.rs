@@ -316,6 +316,34 @@ pub struct RunWakeup {
     pub state: String,
 }
 
+/// One project's Slack digest for one period (a day, or a week keyed by its
+/// Monday). `state` is `pending` → `running` → `done`, or `skipped` when the
+/// project had nothing to report, or `failed`.
+#[derive(Debug, Clone)]
+pub struct StoredDigest {
+    pub project_id: String,
+    pub kind: String,
+    pub period: String,
+    pub state: String,
+    pub session_id: Option<String>,
+    pub attempts: i64,
+    pub started_at: Option<i64>,
+}
+
+const DIGEST_COLS: &str = "project_id, kind, period, state, session_id, attempts, started_at";
+
+fn row_to_digest(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredDigest> {
+    Ok(StoredDigest {
+        project_id: row.get(0)?,
+        kind: row.get(1)?,
+        period: row.get(2)?,
+        state: row.get(3)?,
+        session_id: row.get(4)?,
+        attempts: row.get(5)?,
+        started_at: row.get(6)?,
+    })
+}
+
 /// A queued outbound notification (e.g. a Slack message) awaiting delivery.
 /// See [`Store::enqueue_notification`]. A full row mirror — `drain_once`
 /// only reads `id`/`kind`/`payload_json`/`attempts`; the rest exist for
@@ -610,6 +638,17 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_notifications_outbox_pending
                 ON notifications_outbox(sent_at, created_at);
+            CREATE TABLE IF NOT EXISTS slack_digests (
+                project_id  TEXT NOT NULL,
+                kind        TEXT NOT NULL,
+                period      TEXT NOT NULL,
+                state       TEXT NOT NULL,
+                session_id  TEXT,
+                attempts    INTEGER NOT NULL DEFAULT 0,
+                created_at  INTEGER NOT NULL,
+                started_at  INTEGER,
+                PRIMARY KEY (project_id, kind, period)
+            );
             CREATE TABLE IF NOT EXISTS ui_state (
                 id                       INTEGER PRIMARY KEY CHECK (id = 1),
                 onboarding_completed     INTEGER NOT NULL DEFAULT 0,
@@ -1420,6 +1459,95 @@ impl Store {
             params![kind, run_id],
             |row| row.get::<_, Option<i64>>(0),
         )?)
+    }
+
+    /// Claim one project's digest for one period by inserting its row. False
+    /// when a row already exists, so a restart (or a second tick) can never
+    /// produce the same digest twice.
+    pub fn claim_digest(
+        &self,
+        project_id: &str,
+        kind: &str,
+        period: &str,
+        state: &str,
+        session_id: Option<&str>,
+    ) -> Result<bool> {
+        let inserted = self.conn.execute(
+            "INSERT OR IGNORE INTO slack_digests
+                 (project_id, kind, period, state, session_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![project_id, kind, period, state, session_id, now_ms()],
+        )?;
+        Ok(inserted == 1)
+    }
+
+    pub fn get_digest(
+        &self,
+        project_id: &str,
+        kind: &str,
+        period: &str,
+    ) -> Result<Option<StoredDigest>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {DIGEST_COLS} FROM slack_digests
+                     WHERE project_id = ?1 AND kind = ?2 AND period = ?3"
+                ),
+                params![project_id, kind, period],
+                row_to_digest,
+            )
+            .optional()?)
+    }
+
+    pub fn list_digests_in_state(&self, kind: &str, state: &str) -> Result<Vec<StoredDigest>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {DIGEST_COLS} FROM slack_digests WHERE kind = ?1 AND state = ?2
+             ORDER BY created_at ASC"
+        ))?;
+        let rows = stmt.query_map(params![kind, state], row_to_digest)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Moves a digest to `state`, but only from `from` — the same
+    /// compare-and-set shape as the spawn claims, so two loops can't both
+    /// act on one row.
+    pub fn set_digest_state(&self, digest: &StoredDigest, from: &str, state: &str) -> Result<bool> {
+        let started_at = (state == "running").then(now_ms);
+        let changed = self.conn.execute(
+            "UPDATE slack_digests
+             SET state = ?5, started_at = COALESCE(?6, started_at)
+             WHERE project_id = ?1 AND kind = ?2 AND period = ?3 AND state = ?4",
+            params![
+                digest.project_id,
+                digest.kind,
+                digest.period,
+                from,
+                state,
+                started_at
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Counts a failed try and returns the new total.
+    pub fn record_digest_attempt(&self, digest: &StoredDigest) -> Result<i64> {
+        self.conn.execute(
+            "UPDATE slack_digests SET attempts = attempts + 1
+             WHERE project_id = ?1 AND kind = ?2 AND period = ?3",
+            params![digest.project_id, digest.kind, digest.period],
+        )?;
+        Ok(digest.attempts + 1)
+    }
+
+    /// Every chat session a digest ran in, so a digest never summarizes the
+    /// previous digest as if it were research.
+    pub fn digest_session_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT session_id FROM slack_digests WHERE session_id IS NOT NULL")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
     /// Unsent notifications, oldest first, for the drainer to attempt.

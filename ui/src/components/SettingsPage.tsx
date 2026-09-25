@@ -99,6 +99,7 @@ import {
   type ProjectGitStatus,
   type TelemetrySettings,
   type SlackSettings,
+  type SlackEvents,
   type SlackPreflightResult,
   type Harness,
   type HarnessSetupCommands,
@@ -3275,7 +3276,7 @@ function SlackSection() {
   const patch = (next: Partial<SlackSettings>) =>
     setScopedQueryData(settingsOptions.queryKey, {
       hasWebhook: settings?.hasWebhook ?? false,
-      events: settings?.events ?? { jobSubmitted: false, runSynthesized: false, runStalled: false },
+      events: settings?.events ?? { jobSubmitted: false, runSynthesized: false, runStalled: false, dailyDigest: false, weeklyDigest: false },
       ...next,
     });
   const [saving, setSaving] = useState(false);
@@ -3293,7 +3294,7 @@ function SlackSection() {
       .finally(() => setSaving(false));
   };
 
-  const toggleEvent = (key: "jobSubmitted" | "runSynthesized" | "runStalled") => {
+  const toggleEvent = (key: keyof SlackEvents) => {
     if (!settings || saving) return;
     setSaving(true);
     setError(null);
@@ -3382,6 +3383,32 @@ function SlackSection() {
               aria-label={m.settings_page_slack_run_synthesized_title()}
               disabled={!settings || saving}
               onClick={() => toggleEvent("runSynthesized")}
+            />
+          </div>
+          <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+            <div>
+              <div className="project-default-title text-base font-medium">{m.settings_page_slack_daily_digest_title()}</div>
+              <p>{m.settings_page_slack_daily_digest_description()}</p>
+            </div>
+            <Switch
+              type="button"
+              checked={settings.events.dailyDigest}
+              aria-label={m.settings_page_slack_daily_digest_title()}
+              disabled={!settings || saving}
+              onClick={() => toggleEvent("dailyDigest")}
+            />
+          </div>
+          <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+            <div>
+              <div className="project-default-title text-base font-medium">{m.settings_page_slack_weekly_digest_title()}</div>
+              <p>{m.settings_page_slack_weekly_digest_description()}</p>
+            </div>
+            <Switch
+              type="button"
+              checked={settings.events.weeklyDigest}
+              aria-label={m.settings_page_slack_weekly_digest_title()}
+              disabled={!settings || saving}
+              onClick={() => toggleEvent("weeklyDigest")}
             />
           </div>
           <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
