@@ -328,9 +328,9 @@ fn weekly_prompt(project: &LocalProject, due: &Due, context: &DigestContext) -> 
     )
 }
 
-/// Runs every minute for as long as `orx up` does. Started only when a Slack
-/// webhook is configured (same as the notifier loop); each digest kind's own
-/// toggle is re-read every tick, so switching one off takes effect live.
+/// Runs every minute for as long as `orx up` does. Each digest kind's toggle,
+/// and whether a webhook is saved at all, is re-read every tick, so both take
+/// effect without a restart.
 pub async fn watch_digests(
     chat: Arc<ChatHost>,
     data_dir_move_in_progress: Arc<std::sync::atomic::AtomicBool>,

@@ -11,9 +11,9 @@
 //! a usage limit hit) is each feature's own job — see `notify_events` —
 //! as is where a webhook URL comes from (`config_dir()/slack.json`, the
 //! same shape as `overleaf.json` in `src/config.rs`). [`spawn_notifier_loop`]
-//! is started from `commands::up::run`, only when a webhook is configured.
+//! is started from `commands::up::run` and re-reads the webhook every pass,
+//! so saving or removing one in Settings takes effect without a restart.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -138,22 +138,28 @@ pub async fn drain_once(
     Ok(())
 }
 
-/// Drains the outbox on an interval for as long as `orx up` runs. Exactly
+/// Drains the outbox on an interval for as long as `orx up` runs, through a
+/// Slack webhook provider built from whatever webhook is saved at that
+/// moment — none saved means the pass is skipped and rows wait. Exactly
 /// one of these should run per process — a detached `orx supervise` only
 /// ever enqueues (`Store::enqueue_notification`), never drains, so no two
 /// writers can race a send. Opens a fresh `Store` each tick (cheap: WAL
 /// mode, a short busy timeout) rather than holding one connection across
 /// every await in between, matching `watch_runs`'s loop.
-pub fn spawn_notifier_loop(provider: Arc<dyn NotificationProvider>) {
+pub fn spawn_notifier_loop() {
     tokio::spawn(async move {
         loop {
-            match Store::open() {
-                Ok(store) => {
-                    if let Err(err) = drain_once(store, provider.as_ref()).await {
+            let provider = crate::config::slack_webhook_url().map(SlackWebhookProvider::new);
+            match (provider, Store::open()) {
+                (None, _) => {}
+                (Some(provider), Ok(store)) => {
+                    if let Err(err) = drain_once(store, &provider).await {
                         eprintln!("orx up: notification drain failed (will retry): {err}");
                     }
                 }
-                Err(err) => eprintln!("orx up: notification drain could not open the store: {err}"),
+                (Some(_), Err(err)) => {
+                    eprintln!("orx up: notification drain could not open the store: {err}")
+                }
             }
             tokio::time::sleep(Duration::from_secs(15)).await;
         }
@@ -163,7 +169,7 @@ pub fn spawn_notifier_loop(provider: Arc<dyn NotificationProvider>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     /// Records every `(kind, payload)` it was asked to send and returns a
     /// scripted outcome per call, so tests can drive multi-attempt behavior

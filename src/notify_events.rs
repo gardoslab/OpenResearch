@@ -11,9 +11,8 @@
 //! **Enqueue-gated, not drain-gated**: both helpers check
 //! `telemetry::slack_event_settings()` and `config::slack_webhook_url()`
 //! *before* calling `Store::enqueue_notification`, rather than always
-//! enqueueing and letting an idle drain loop (or one that never starts,
-//! per `commands::up::run`'s webhook-gated `spawn_notifier_loop` call) sit on
-//! the rows forever. Two reasons: a "job submitted" or "run synthesized"
+//! enqueueing and letting the drain loop (which skips every pass while no
+//! webhook is saved) sit on the rows until one is. Two reasons: a "job submitted" or "run synthesized"
 //! notification is time-sensitive — sending it stale, days later, the moment
 //! someone finally configures a webhook would be confusing rather than
 //! useful — and gating here also keeps `notifications_outbox` from

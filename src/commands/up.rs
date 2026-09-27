@@ -188,21 +188,13 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
     ));
-    // Only start the drain loop when a webhook is actually configured —
-    // otherwise every drain pass would just poll an empty-or-doomed-to-fail
-    // outbox. This means changing the webhook in Settings while `orx up` is
-    // already running takes effect on the next restart, not live: a
-    // live-reload path (watching config for changes, swapping the provider
-    // under the loop) is more machinery than two events warrant for T6.
-    if let Some(webhook_url) = crate::config::slack_webhook_url() {
-        crate::notify::spawn_notifier_loop(std::sync::Arc::new(
-            crate::notify::SlackWebhookProvider::new(webhook_url),
-        ));
-        tokio::spawn(local::chat::watch_digests(
-            state.chat.clone(),
-            state.data_dir_move_in_progress.clone(),
-        ));
-    }
+    // Both always run and read the webhook each pass (no webhook = idle), so
+    // saving one in Settings takes effect without restarting `orx up`.
+    crate::notify::spawn_notifier_loop();
+    tokio::spawn(local::chat::watch_digests(
+        state.chat.clone(),
+        state.data_dir_move_in_progress.clone(),
+    ));
     spawn_claude_auth_monitor(state.chat.clone(), claude.clone());
     spawn_background_tasks(remote_auth.is_none());
     let live_events = state.chat.clone();
