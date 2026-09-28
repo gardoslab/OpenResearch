@@ -543,7 +543,7 @@ async fn advance_weekly(chat: &Arc<ChatHost>) -> Result<()> {
                 store.set_digest_state(&row, "pending", "failed")?;
                 continue;
             };
-            let Some(due) = weekly_due_for(&row.period) else {
+            let Some(due) = weekly_due_for(&row.period, &jiff::tz::TimeZone::system()) else {
                 store.set_digest_state(&row, "pending", "failed")?;
                 continue;
             };
@@ -607,7 +607,7 @@ async fn advance_weekly(chat: &Arc<ChatHost>) -> Result<()> {
         };
         match closing_outcome(&store, &session, final_answer_text)? {
             SpawnOutcome::Reply(text) => {
-                let title = weekly_due_for(&row.period)
+                let title = weekly_due_for(&row.period, &jiff::tz::TimeZone::system())
                     .map(|due| due.title)
                     .unwrap_or_else(|| "Weekly digest".to_string());
                 crate::notify_events::enqueue_digest(
@@ -667,16 +667,17 @@ pub async fn send_digest_now(kind: &str) -> Result<SendNowReport> {
 
 /// Rebuild a weekly `Due` from its stored period (that week's Monday), so a
 /// turn started on one tick is prompted and titled the same on a later one.
-fn weekly_due_for(period: &str) -> Option<Due> {
+///
+/// `tz` is the zone the period's midnights are taken in: the system zone in
+/// production (what `Zoned::now()` used when the row was made), explicit in
+/// tests so they don't depend on the machine they run on.
+fn weekly_due_for(period: &str, tz: &jiff::tz::TimeZone) -> Option<Due> {
     let (date, suffix) = match period.split_once('#') {
         Some((date, suffix)) => (date, Some(suffix)),
         None => (period, None),
     };
     let monday: jiff::civil::Date = date.parse().ok()?;
-    let at = monday
-        .at(DIGEST_HOUR, 0, 0, 0)
-        .to_zoned(jiff::tz::TimeZone::system())
-        .ok()?;
+    let at = monday.at(DIGEST_HOUR, 0, 0, 0).to_zoned(tz.clone()).ok()?;
     let mut due = due_digest(&at, true).filter(|due| due.kind == DigestKind::Weekly)?;
     if let Some(suffix) = suffix {
         due.period = format!("{}#{suffix}", due.period);
@@ -690,6 +691,10 @@ mod tests {
 
     fn at(s: &str) -> Zoned {
         s.parse().unwrap()
+    }
+
+    fn new_york() -> jiff::tz::TimeZone {
+        jiff::tz::TimeZone::get("America/New_York").unwrap()
     }
 
     #[test]
@@ -750,10 +755,10 @@ mod tests {
 
     #[test]
     fn a_stored_weekly_period_rebuilds_the_same_due() {
-        let due = weekly_due_for("2026-09-28").unwrap();
+        let due = weekly_due_for("2026-09-28", &new_york()).unwrap();
         assert_eq!(due.period, "2026-09-28");
         assert_eq!(due.title, "Weekly digest \u{b7} week of Sep 21");
-        assert!(weekly_due_for("2026-09-29").is_none());
+        assert!(weekly_due_for("2026-09-29", &new_york()).is_none());
     }
 
     #[test]
@@ -761,7 +766,7 @@ mod tests {
         let tuesday = at("2026-09-29T15:00[America/New_York]");
         let weekly = manual(weekly_due_at(&tuesday).unwrap());
         assert!(weekly.period.starts_with("2026-09-28#manual-"));
-        let rebuilt = weekly_due_for(&weekly.period).unwrap();
+        let rebuilt = weekly_due_for(&weekly.period, &new_york()).unwrap();
         assert_eq!(rebuilt.period, weekly.period);
         assert_eq!(rebuilt.window_start_ms, weekly.window_start_ms);
         assert_eq!(rebuilt.title, "Weekly digest \u{b7} week of Sep 21");
