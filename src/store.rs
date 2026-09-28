@@ -359,6 +359,38 @@ pub struct StoredNotification {
     pub sent_at: Option<i64>,
     pub attempts: i64,
     pub last_error: Option<String>,
+    pub run_id: Option<String>,
+    /// The chat a Slack thread reply to this message should reach, when
+    /// there is one. Only a bot-posted message can be replied to.
+    pub chat_session_id: Option<String>,
+}
+
+/// A bot-posted Slack message whose thread leads back to a chat session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlackThread {
+    pub channel: String,
+    pub ts: String,
+    pub chat_session_id: String,
+    pub run_id: Option<String>,
+    pub kind: String,
+    pub created_at: i64,
+}
+
+/// One Slack thread reply that passed intake, on its way into a chat.
+/// `(channel, ts)` is unique, which dedupes Slack's retries, the backfill,
+/// and a live event racing the backfill all at once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlackInboxItem {
+    pub id: String,
+    pub channel: String,
+    pub ts: String,
+    pub thread_ts: String,
+    pub user_id: String,
+    pub text: String,
+    pub chat_session_id: String,
+    pub state: String,
+    pub attempts: i64,
+    pub received_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -638,6 +670,34 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_notifications_outbox_pending
                 ON notifications_outbox(sent_at, created_at);
+            CREATE TABLE IF NOT EXISTS slack_messages (
+                channel         TEXT NOT NULL,
+                ts              TEXT NOT NULL,
+                chat_session_id TEXT NOT NULL,
+                run_id          TEXT,
+                kind            TEXT NOT NULL,
+                created_at      INTEGER NOT NULL,
+                PRIMARY KEY (channel, ts)
+            );
+            CREATE INDEX IF NOT EXISTS idx_slack_messages_created
+                ON slack_messages(created_at);
+            CREATE TABLE IF NOT EXISTS slack_inbox (
+                id              TEXT PRIMARY KEY,
+                channel         TEXT NOT NULL,
+                ts              TEXT NOT NULL,
+                thread_ts       TEXT NOT NULL,
+                user_id         TEXT NOT NULL,
+                text            TEXT NOT NULL,
+                chat_session_id TEXT NOT NULL,
+                state           TEXT NOT NULL DEFAULT 'pending',
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                last_error      TEXT,
+                received_at     INTEGER NOT NULL,
+                delivered_at    INTEGER,
+                UNIQUE (channel, ts)
+            );
+            CREATE INDEX IF NOT EXISTS idx_slack_inbox_state
+                ON slack_inbox(state, received_at);
             CREATE TABLE IF NOT EXISTS slack_digests (
                 project_id  TEXT NOT NULL,
                 kind        TEXT NOT NULL,
@@ -702,6 +762,7 @@ impl Store {
             "ALTER TABLE chat_run_wakeups ADD COLUMN turn_id TEXT",
             "ALTER TABLE chat_run_wakeups ADD COLUMN pre_turn_description TEXT",
             "ALTER TABLE notifications_outbox ADD COLUMN run_id TEXT",
+            "ALTER TABLE notifications_outbox ADD COLUMN chat_session_id TEXT",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -1441,11 +1502,24 @@ impl Store {
         run_id: Option<&str>,
         payload_json: &str,
     ) -> Result<String> {
+        self.enqueue_session_notification(kind, run_id, None, payload_json)
+    }
+
+    /// [`Self::enqueue_notification`] for a message a Slack thread reply
+    /// should lead back to `chat_session_id` from, once the bot posts it.
+    pub fn enqueue_session_notification(
+        &self,
+        kind: &str,
+        run_id: Option<&str>,
+        chat_session_id: Option<&str>,
+        payload_json: &str,
+    ) -> Result<String> {
         let id = format!("notif_{}", uuid::Uuid::new_v4());
         self.conn.execute(
-            "INSERT INTO notifications_outbox (id, created_at, kind, payload_json, run_id)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, now_ms(), kind, payload_json, run_id],
+            "INSERT INTO notifications_outbox
+                 (id, created_at, kind, payload_json, run_id, chat_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, now_ms(), kind, payload_json, run_id, chat_session_id],
         )?;
         Ok(id)
     }
@@ -1553,7 +1627,8 @@ impl Store {
     /// Unsent notifications, oldest first, for the drainer to attempt.
     pub fn list_pending_notifications(&self, limit: usize) -> Result<Vec<StoredNotification>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, created_at, kind, payload_json, sent_at, attempts, last_error
+            "SELECT id, created_at, kind, payload_json, sent_at, attempts, last_error,
+                    run_id, chat_session_id
              FROM notifications_outbox
              WHERE sent_at IS NULL
              ORDER BY created_at ASC LIMIT ?1",
@@ -1567,9 +1642,146 @@ impl Store {
                 sent_at: row.get(4)?,
                 attempts: row.get(5)?,
                 last_error: row.get(6)?,
+                run_id: row.get(7)?,
+                chat_session_id: row.get(8)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Remember that the bot posted `(channel, ts)` about `chat_session_id`,
+    /// so a thread reply to it can find its way back.
+    pub fn record_slack_thread(&self, thread: &SlackThread) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO slack_messages
+                 (channel, ts, chat_session_id, run_id, kind, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                thread.channel,
+                thread.ts,
+                thread.chat_session_id,
+                thread.run_id,
+                thread.kind,
+                thread.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn slack_thread(&self, channel: &str, ts: &str) -> Result<Option<SlackThread>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT channel, ts, chat_session_id, run_id, kind, created_at
+                 FROM slack_messages WHERE channel = ?1 AND ts = ?2",
+                params![channel, ts],
+                slack_thread_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Threads posted since `since_ms`, newest first, each with the newest
+    /// reply already taken in — where a backfill resumes from.
+    pub fn recent_slack_threads(
+        &self,
+        since_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<(SlackThread, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.channel, m.ts, m.chat_session_id, m.run_id, m.kind, m.created_at,
+                    (SELECT i.ts FROM slack_inbox i
+                     WHERE i.channel = m.channel AND i.thread_ts = m.ts
+                     ORDER BY CAST(i.ts AS REAL) DESC LIMIT 1)
+             FROM slack_messages m
+             WHERE m.created_at >= ?1
+             ORDER BY m.created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since_ms, limit as i64], |row| {
+            Ok((
+                slack_thread_from_row(row)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Take in one thread reply. False when `(channel, ts)` is already in —
+    /// a Slack retry, or a reply both the backfill and a live event saw.
+    pub fn insert_slack_inbox(
+        &self,
+        channel: &str,
+        ts: &str,
+        thread_ts: &str,
+        user_id: &str,
+        text: &str,
+        chat_session_id: &str,
+    ) -> Result<bool> {
+        let inserted = self.conn.execute(
+            "INSERT OR IGNORE INTO slack_inbox
+                 (id, channel, ts, thread_ts, user_id, text, chat_session_id, received_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                format!("slin_{}", uuid::Uuid::new_v4()),
+                channel,
+                ts,
+                thread_ts,
+                user_id,
+                text,
+                chat_session_id,
+                now_ms()
+            ],
+        )?;
+        Ok(inserted > 0)
+    }
+
+    /// Replies still waiting to reach their chat, oldest first.
+    pub fn list_pending_slack_inbox(&self, limit: usize) -> Result<Vec<SlackInboxItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, channel, ts, thread_ts, user_id, text, chat_session_id, state,
+                    attempts, received_at
+             FROM slack_inbox WHERE state = 'pending'
+             ORDER BY received_at ASC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], slack_inbox_from_row)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_slack_inbox(&self, id: &str) -> Result<Option<SlackInboxItem>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, channel, ts, thread_ts, user_id, text, chat_session_id, state,
+                        attempts, received_at
+                 FROM slack_inbox WHERE id = ?1",
+                params![id],
+                slack_inbox_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn mark_slack_inbox_delivered(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE slack_inbox SET state = 'delivered', delivered_at = ?2 WHERE id = ?1",
+            params![id, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Count a failed delivery; `give_up` retires the row as `failed`.
+    pub fn mark_slack_inbox_attempt_failed(
+        &self,
+        id: &str,
+        error: &str,
+        give_up: bool,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE slack_inbox
+             SET attempts = attempts + 1, last_error = ?2,
+                 state = CASE WHEN ?3 THEN 'failed' ELSE state END
+             WHERE id = ?1",
+            params![id, error, give_up],
+        )?;
+        Ok(())
     }
 
     pub fn mark_notification_sent(&self, id: &str) -> Result<()> {
@@ -3578,6 +3790,32 @@ pub fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn slack_thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SlackThread> {
+    Ok(SlackThread {
+        channel: row.get(0)?,
+        ts: row.get(1)?,
+        chat_session_id: row.get(2)?,
+        run_id: row.get(3)?,
+        kind: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
+fn slack_inbox_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SlackInboxItem> {
+    Ok(SlackInboxItem {
+        id: row.get(0)?,
+        channel: row.get(1)?,
+        ts: row.get(2)?,
+        thread_ts: row.get(3)?,
+        user_id: row.get(4)?,
+        text: row.get(5)?,
+        chat_session_id: row.get(6)?,
+        state: row.get(7)?,
+        attempts: row.get(8)?,
+        received_at: row.get(9)?,
+    })
 }
 
 #[cfg(test)]

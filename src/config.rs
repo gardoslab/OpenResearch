@@ -247,6 +247,53 @@ fn slack_credentials_path() -> PathBuf {
 struct SlackCredentials {
     #[serde(default, rename = "webhookUrl")]
     webhook_url: String,
+    #[serde(flatten)]
+    app: SlackApp,
+}
+
+/// The Slack app half of `slack.json` (0.5.0): the bot token that posts
+/// reply-able messages, the app-level token that opens the Socket Mode
+/// connection, and who may reach an agent through a thread reply. Empty
+/// fields are left out of the file, so a webhook-only setup reads exactly
+/// as it did before.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlackApp {
+    /// `xoxb-…`, for `chat.postMessage` and the other Web API calls.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bot_token: String,
+    /// `xapp-…` with `connections:write`, for `apps.connections.open`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app_token: String,
+    /// Where bot-posted messages go (`C…` or `G…`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub channel_id: String,
+    /// Slack user ids (`U…`) whose thread replies are delivered. A reply
+    /// lands in an agent that has a shell on the cluster, so nobody else's is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_user_ids: Vec<String>,
+    /// Whether this machine holds the Socket Mode connection. Slack spreads
+    /// events across every open connection, so only one orx may hold it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hold_socket: bool,
+}
+
+impl SlackApp {
+    /// Bot token and channel, when both are set: what posting needs.
+    pub fn poster(&self) -> Option<(String, String)> {
+        let token = non_empty(self.bot_token.clone())?;
+        let channel = non_empty(self.channel_id.clone())?;
+        Some((token, channel))
+    }
+
+    /// Whether this machine should hold the Socket Mode connection now.
+    pub fn socket_ready(&self) -> bool {
+        self.hold_socket && !self.app_token.is_empty() && self.poster().is_some()
+    }
+
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 fn slack_credentials() -> SlackCredentials {
@@ -260,7 +307,7 @@ fn slack_credentials() -> SlackCredentials {
 /// file goes away rather than lingering with nothing in it.
 fn save_slack_credentials(credentials: &SlackCredentials) -> Result<()> {
     let path = slack_credentials_path();
-    if credentials.webhook_url.is_empty() {
+    if credentials.webhook_url.is_empty() && credentials.app.is_empty() {
         return match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -297,6 +344,23 @@ pub fn clear_slack_webhook_url() -> Result<()> {
     let mut credentials = slack_credentials();
     credentials.webhook_url.clear();
     save_slack_credentials(&credentials)
+}
+
+pub fn slack_app() -> SlackApp {
+    slack_credentials().app
+}
+
+pub fn set_slack_app(app: SlackApp) -> Result<()> {
+    let mut credentials = slack_credentials();
+    credentials.app = app;
+    save_slack_credentials(&credentials)
+}
+
+/// Whether anything can post to Slack: the bot (bot token and channel) or
+/// the incoming webhook.
+pub fn slack_can_post() -> bool {
+    let credentials = slack_credentials();
+    !credentials.webhook_url.is_empty() || credentials.app.poster().is_some()
 }
 
 /// The user-chosen data dir, if one is persisted and non-empty. Consumed by
@@ -611,6 +675,7 @@ mod tests {
     fn slack_credentials_json_shape_uses_camel_case_webhook_url() {
         let credentials = SlackCredentials {
             webhook_url: "https://hooks.slack.com/services/T000/B000/xxx".to_string(),
+            app: SlackApp::default(),
         };
         let json = serde_json::to_string(&credentials).unwrap();
         assert_eq!(
@@ -619,5 +684,34 @@ mod tests {
         );
         let parsed: SlackCredentials = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.webhook_url, credentials.webhook_url);
+    }
+
+    #[test]
+    fn slack_app_settings_share_the_file_with_the_webhook() {
+        with_isolated_config_dir(|| {
+            set_slack_webhook_url("https://hooks.slack.com/services/T000/B000/xxx").unwrap();
+            let app = SlackApp {
+                bot_token: "xoxb-1".into(),
+                app_token: "xapp-1".into(),
+                channel_id: "C123".into(),
+                allowed_user_ids: vec!["U1".into()],
+                hold_socket: true,
+            };
+            set_slack_app(app.clone()).unwrap();
+            assert_eq!(slack_app(), app);
+            assert!(slack_app().socket_ready());
+            assert_eq!(
+                slack_webhook_url().as_deref(),
+                Some("https://hooks.slack.com/services/T000/B000/xxx")
+            );
+
+            // Removing the webhook keeps the file while the app is configured.
+            clear_slack_webhook_url().unwrap();
+            assert!(slack_can_post());
+            assert!(slack_credentials_path().exists());
+            set_slack_app(SlackApp::default()).unwrap();
+            assert!(!slack_can_post());
+            assert!(!slack_credentials_path().exists());
+        });
     }
 }

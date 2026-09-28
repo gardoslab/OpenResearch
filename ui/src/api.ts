@@ -1584,7 +1584,34 @@ export const setTelemetry = (enabled: boolean) =>
 export interface SlackSettings {
   /** Whether a webhook URL is saved; the URL itself is never echoed back. */
   hasWebhook: boolean;
+  app: SlackApp;
+  socket: SlackSocketStatus;
   events: SlackEvents;
+}
+
+/** The Slack app that posts reply-able messages and takes thread replies back. Tokens are never echoed back. */
+export interface SlackApp {
+  hasBotToken: boolean;
+  hasAppToken: boolean;
+  channelId: string;
+  allowedUserIds: string[];
+  /** Whether this machine holds the Socket Mode connection. Only one orx per app should. */
+  holdSocket: boolean;
+}
+
+export interface SlackSocketStatus {
+  state: "off" | "connecting" | "connected" | "error";
+  since: number;
+  error: string | null;
+}
+
+/** Tokens are write-only: leave one out to keep it, send "" to clear it. */
+export interface SlackAppUpdate {
+  botToken?: string;
+  appToken?: string;
+  channelId: string;
+  allowedUserIds: string[];
+  holdSocket: boolean;
 }
 
 export interface SlackEvents {
@@ -1611,6 +1638,9 @@ export const deleteSlackWebhook = () =>
 export const setSlackEvents = (events: SlackEvents) =>
   post<SlackEvents>("/api/settings/slack/events", events);
 
+export const setSlackApp = (update: SlackAppUpdate) =>
+  post<SlackSettings>("/api/settings/slack/app", update);
+
 export interface SlackDigestReport {
   sent: number;
   skipped: number;
@@ -1621,7 +1651,7 @@ export interface SlackDigestReport {
 export const sendSlackDigest = (kind: "daily" | "weekly") =>
   post<SlackDigestReport>("/api/settings/slack/digest", { kind });
 
-/** Sends a real test message to the currently saved webhook. */
+/** Sends a real test message through the Slack app when one is configured, else the saved webhook. */
 export const slackPreflight = () => post<SlackPreflightResult>("/api/settings/slack/preflight");
 
 export type OnboardingStep = "welcome" | "environment" | "profile";

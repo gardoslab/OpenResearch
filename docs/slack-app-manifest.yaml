@@ -1,0 +1,44 @@
+# Slack app manifest for orx (0.5.0+).
+#
+# Create the app at https://api.slack.com/apps → Create New App → From a manifest,
+# pick the workspace, paste this file. Then:
+#   1. Basic Information → App-Level Tokens → generate one with `connections:write`
+#      (the `xapp-…` token; manifests cannot create it).
+#   2. Install App → install to the workspace (BU may require admin approval), pick
+#      the channel for the incoming webhook, and copy the Bot User OAuth Token
+#      (`xoxb-…`) and the webhook URL.
+#   3. In Slack, `/invite @herb` into that channel.
+#   4. Paste the tokens, webhook URL and channel ID into orx Settings → Slack.
+
+display_information:
+  name: herb
+  description: OpenResearch run updates, digests, and replies to experiment chats.
+  background_color: "#1f2937"
+
+features:
+  bot_user:
+    display_name: herb
+    always_online: true
+
+oauth_config:
+  scopes:
+    bot:
+      - chat:write          # post run/digest messages; returns ts for reply mapping
+      - channels:history    # receive thread replies in public channels
+      - groups:history      # ...and in private channels
+      - reactions:write     # 👀 ack on a reply orx picked up
+      - users:read          # show who replied, check against the allow-list
+      - incoming-webhook    # keeps the webhook path working from the same app
+      # 0.6.0: - app_mentions:read
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.channels
+      - message.groups
+      # 0.6.0: - app_mention
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

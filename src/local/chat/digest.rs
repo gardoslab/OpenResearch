@@ -74,7 +74,7 @@ impl DigestKind {
             DigestKind::Daily => events.daily_digest,
             DigestKind::Weekly => events.weekly_digest,
         };
-        on && crate::config::slack_webhook_url().is_some()
+        on && crate::config::slack_can_post()
     }
 }
 

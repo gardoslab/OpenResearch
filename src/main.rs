@@ -30,6 +30,8 @@ mod output;
 mod paths;
 mod plane;
 mod remote;
+mod slack_api;
+mod slack_inbound;
 mod store;
 mod telemetry;
 mod updates;
