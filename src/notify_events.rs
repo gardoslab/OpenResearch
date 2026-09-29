@@ -281,10 +281,9 @@ pub fn enqueue_digest(
     kind: &str,
     title: &str,
     text: &str,
-) -> Result<()> {
+) -> Result<String> {
     let header = format!("[{}] {title}", project.name);
-    store.enqueue_notification(kind, None, &payload(&header, text.trim()).to_string())?;
-    Ok(())
+    store.enqueue_notification(kind, None, &payload(&header, text.trim()).to_string())
 }
 
 #[cfg(test)]
