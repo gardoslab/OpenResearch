@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.4.1]
+
+Slack digests now report the key learning since the previous digest and a running "best so far" commentary on the project's headline metric (F1 Macro where reported). Each digest builds on the last one Slack actually delivered, and marks what is new since then.
+
 ## [0.4.0]
 
 Slack digests, one per project: a weekday-morning digest of runs in flight and open next steps from this week's chats, and a Monday digest of last week's progress, open next steps, and a search for relevant new work.
