@@ -191,6 +191,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // Both always run and read the webhook each pass (no webhook = idle), so
     // saving one in Settings takes effect without restarting `orx up`.
     crate::notify::spawn_notifier_loop();
+    crate::slack_inbound::spawn_socket_loop();
     tokio::spawn(local::chat::watch_digests(
         state.chat.clone(),
         state.data_dir_move_in_progress.clone(),
@@ -685,6 +686,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
                 .delete(delete_slack_webhook),
         )
         .route("/api/settings/slack/events", post(set_slack_events))
+        .route("/api/settings/slack/app", post(set_slack_app))
         .route("/api/settings/slack/preflight", post(slack_preflight))
         .route("/api/settings/slack/digest", post(slack_send_digest))
         .route("/api/settings/compute", get(compute_settings))
@@ -5357,8 +5359,17 @@ async fn set_auto_continue_on_limit(Json(req): Json<SetAutoContinueOnLimitReq>) 
 
 fn slack_settings_json() -> Value {
     let events = crate::telemetry::slack_event_settings();
+    let app = crate::config::slack_app();
     json!({
         "hasWebhook": crate::config::slack_webhook_url().is_some(),
+        "app": {
+            "hasBotToken": !app.bot_token.is_empty(),
+            "hasAppToken": !app.app_token.is_empty(),
+            "channelId": app.channel_id,
+            "allowedUserIds": app.allowed_user_ids,
+            "holdSocket": app.hold_socket,
+        },
+        "socket": crate::slack_inbound::socket_status_json(),
         "events": {
             "jobSubmitted": events.job_submitted,
             "runSynthesized": events.run_synthesized,
@@ -5411,6 +5422,88 @@ async fn delete_slack_webhook() -> ApiResult {
     .await
 }
 
+/// Tokens are write-only: `None` keeps the saved one, `""` clears it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetSlackAppReq {
+    #[serde(default)]
+    bot_token: Option<String>,
+    #[serde(default)]
+    app_token: Option<String>,
+    channel_id: String,
+    allowed_user_ids: Vec<String>,
+    hold_socket: bool,
+}
+
+/// Checks the shape of what Settings → Slack sends for the app, so a token
+/// pasted into the wrong field fails here with a message saying so.
+fn validate_slack_app(
+    req: SetSlackAppReq,
+    saved: crate::config::SlackApp,
+) -> std::result::Result<crate::config::SlackApp, String> {
+    fn token(
+        new: Option<String>,
+        saved: String,
+        prefix: &str,
+        what: &str,
+    ) -> std::result::Result<String, String> {
+        match new.map(|token| token.trim().to_string()) {
+            None => Ok(saved),
+            Some(token) if token.is_empty() || token.starts_with(prefix) => Ok(token),
+            Some(_) => Err(format!("The {what} should start with {prefix}.")),
+        }
+    }
+    let channel_id = req.channel_id.trim().to_string();
+    let is_slack_id = |id: &str, prefixes: &[char]| {
+        id.len() >= 9
+            && id.starts_with(prefixes)
+            && id
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    };
+    if !channel_id.is_empty() && !is_slack_id(&channel_id, &['C', 'G']) {
+        return Err(
+            "The channel ID looks like C0123456789 — in Slack, open the channel's details and \
+             copy it from the bottom of the About tab."
+                .to_string(),
+        );
+    }
+    let mut allowed_user_ids = Vec::new();
+    for id in req
+        .allowed_user_ids
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+    {
+        if !is_slack_id(id, &['U', 'W']) {
+            return Err(format!(
+                "{id} is not a Slack member ID. They look like U0123456789 — open the \
+                 person's profile, then ⋮ → Copy member ID."
+            ));
+        }
+        if !allowed_user_ids.iter().any(|seen| seen == id) {
+            allowed_user_ids.push(id.to_string());
+        }
+    }
+    Ok(crate::config::SlackApp {
+        bot_token: token(req.bot_token, saved.bot_token, "xoxb-", "bot token")?,
+        app_token: token(req.app_token, saved.app_token, "xapp-", "app-level token")?,
+        channel_id,
+        allowed_user_ids,
+        hold_socket: req.hold_socket,
+    })
+}
+
+async fn set_slack_app(Json(req): Json<SetSlackAppReq>) -> ApiResult {
+    blocking_api(move || {
+        let app =
+            validate_slack_app(req, crate::config::slack_app()).map_err(|e| bad_request(&e))?;
+        crate::config::set_slack_app(app)?;
+        Ok(Json(slack_settings_json()))
+    })
+    .await
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SetSlackEventsReq {
@@ -5444,8 +5537,19 @@ async fn set_slack_events(Json(req): Json<SetSlackEventsReq>) -> ApiResult {
 
 /// Synchronous "test now" probe, matching `sge_preflight`'s shape: sends a
 /// real message straight through a one-off provider rather than the outbox,
-/// so the result is a Slack answer, not "enqueued".
+/// so the result is a Slack answer, not "enqueued". With the app configured
+/// it tests the app instead: the bot token, posting to the channel, and the
+/// app-level token when one is saved.
 async fn slack_preflight() -> ApiResult {
+    let app = crate::config::slack_app();
+    if let Some((token, channel)) = app.poster() {
+        return Ok(Json(
+            match slack_app_preflight(&token, &channel, &app.app_token).await {
+                Ok(()) => json!({ "ok": true, "error": Value::Null }),
+                Err(error) => json!({ "ok": false, "error": error }),
+            },
+        ));
+    }
     let Some(webhook_url) = crate::config::slack_webhook_url() else {
         return Ok(Json(
             json!({ "ok": false, "error": "No Slack webhook is saved yet." }),
@@ -5456,7 +5560,7 @@ async fn slack_preflight() -> ApiResult {
         .send("preflight", &json!({ "text": "orx connected \u{2713}" }))
         .await;
     Ok(Json(match outcome {
-        crate::notify::DeliveryOutcome::Sent => json!({ "ok": true, "error": Value::Null }),
+        crate::notify::DeliveryOutcome::Sent(_) => json!({ "ok": true, "error": Value::Null }),
         crate::notify::DeliveryOutcome::Rejected => json!({
             "ok": false,
             "error": "Slack rejected the message — the webhook may be revoked or malformed.",
@@ -5468,6 +5572,32 @@ async fn slack_preflight() -> ApiResult {
     }))
 }
 
+async fn slack_app_preflight(
+    token: &str,
+    channel: &str,
+    app_token: &str,
+) -> std::result::Result<(), String> {
+    use crate::slack_api::SlackApi;
+    let bot = SlackApi::new(token);
+    bot.auth_test()
+        .await
+        .map_err(|e| format!("Slack refused the bot token ({e})."))?;
+    bot.post_message(channel, "orx connected \u{2713}", None, None)
+        .await
+        .map_err(|e| match e.to_string().as_str() {
+            "not_in_channel" | "channel_not_found" => format!(
+                "The bot cannot post to {channel} ({e}). Invite it with /invite in that channel."
+            ),
+            _ => format!("Could not post to {channel} ({e})."),
+        })?;
+    if !app_token.is_empty() {
+        SlackApi::new(app_token).open_socket().await.map_err(|e| {
+            format!("The bot can post, but Slack refused the app-level token ({e}).")
+        })?;
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct SlackSendDigestReq {
     kind: String,
@@ -5477,8 +5607,8 @@ struct SlackSendDigestReq {
 /// now, through the outbox like a scheduled one. A daily has been written by
 /// the time this answers; a weekly has only had its agent turn queued.
 async fn slack_send_digest(Json(req): Json<SlackSendDigestReq>) -> ApiResult {
-    if crate::config::slack_webhook_url().is_none() {
-        return Err(bad_request("No Slack webhook is saved yet."));
+    if !crate::config::slack_can_post() {
+        return Err(bad_request("No Slack webhook or bot is saved yet."));
     }
     if !matches!(req.kind.as_str(), "daily" | "weekly") {
         return Err(bad_request("kind must be daily or weekly"));
@@ -9153,6 +9283,42 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slack_app_settings_are_checked_and_tokens_are_write_only() {
+        let saved = crate::config::SlackApp {
+            bot_token: "xoxb-saved".into(),
+            app_token: "xapp-saved".into(),
+            ..Default::default()
+        };
+        let req = |bot: Option<&str>, channel: &str, users: &[&str]| SetSlackAppReq {
+            bot_token: bot.map(str::to_string),
+            app_token: None,
+            channel_id: channel.to_string(),
+            allowed_user_ids: users.iter().map(|u| u.to_string()).collect(),
+            hold_socket: true,
+        };
+
+        let app = validate_slack_app(
+            req(None, " C0123456789 ", &["U0123456789", " U0123456789", ""]),
+            saved.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            app.bot_token, "xoxb-saved",
+            "an absent token keeps the saved one"
+        );
+        assert_eq!(app.app_token, "xapp-saved");
+        assert_eq!(app.channel_id, "C0123456789");
+        assert_eq!(app.allowed_user_ids, vec!["U0123456789".to_string()]);
+
+        let cleared = validate_slack_app(req(Some(""), "", &[]), saved.clone()).unwrap();
+        assert_eq!(cleared.bot_token, "");
+
+        assert!(validate_slack_app(req(Some("xapp-wrong-field"), "", &[]), saved.clone()).is_err());
+        assert!(validate_slack_app(req(None, "#general", &[]), saved.clone()).is_err());
+        assert!(validate_slack_app(req(None, "", &["jdoe"]), saved).is_err());
+    }
 
     #[test]
     fn slack_webhook_url_shape_is_checked_before_saving() {

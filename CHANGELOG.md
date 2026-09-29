@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.5.0]
+
+Reply to orx from Slack: with the Slack app's bot and app-level tokens saved, orx posts as the app, and a reply in a run message's thread from an allow-listed member goes to the chat that ran it. The agent's answer is posted back into the thread. One machine holds the Socket Mode connection ("Receive replies on this machine"), and replies sent while it was offline are picked up when it reconnects. The app needs the `message.channels` event (`message.groups` for private channels); see `docs/slack-app-manifest.yaml`.
+
 ## [0.4.1]
 
 Slack digests now report the key learning since the previous digest and a running "best so far" commentary on the project's headline metric (F1 Macro where reported). Each digest builds on the last one Slack actually delivered, and marks what is new since then.

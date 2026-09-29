@@ -5671,10 +5671,16 @@ impl ChatHost {
                 if changed {
                     let resume_at = ctx.resume_at.take();
                     ctx.push_turn_failure(&kind, message.clone(), action, resume_at);
-                    if let Some(resume_at) = resume_at {
-                        if let Ok(store) = Store::open() {
+                    if let Ok(store) = Store::open() {
+                        if let Some(resume_at) = resume_at {
                             let _ = store.set_turn_resume_at(&ctx.turn_id, resume_at);
                         }
+                        notify_slack_if_slack_turn(
+                            &store,
+                            &ctx.session_id,
+                            &ctx.turn_id,
+                            Some(&message),
+                        );
                     }
                 }
                 if changed && ctx.retry_exhausted {
@@ -5694,6 +5700,7 @@ impl ChatHost {
                 let completed = store.complete_chat_turn(&ctx.turn_id).unwrap_or(false);
                 if completed {
                     notify_run_synthesized_if_wakeup_turn(&store, &ctx.turn_id);
+                    notify_slack_if_slack_turn(&store, &ctx.session_id, &ctx.turn_id, None);
                 }
                 completed
             } else {
@@ -8077,6 +8084,122 @@ fn notify_run_synthesized_if_wakeup_turn(store: &Store, turn_id: &str) {
     }
 }
 
+/// Idempotency key of a turn started by a Slack thread reply: the reply's
+/// `slack_inbox` id, so the finished turn can find its thread again.
+const SLACK_TURN_PREFIX: &str = "slack:";
+
+/// Post a Slack-started turn's closing answer (or its failure) back into the
+/// thread the reply came from. A no-op for every other turn.
+fn notify_slack_if_slack_turn(
+    store: &Store,
+    session_id: &str,
+    turn_id: &str,
+    failure: Option<&str>,
+) {
+    let Ok(Some(turn)) = store.get_chat_turn(session_id, turn_id) else {
+        return;
+    };
+    let Some(inbox_id) = turn.client_turn_id.strip_prefix(SLACK_TURN_PREFIX) else {
+        return;
+    };
+    let Ok(Some(item)) = store.get_slack_inbox(inbox_id) else {
+        return;
+    };
+    let text = match failure {
+        Some(error) => format!(
+            "The agent's turn failed: {}",
+            truncated(error.trim(), SPAWN_REPORT_LIMIT)
+        ),
+        None => {
+            let Ok(Some(session)) = store.get_chat_session(session_id) else {
+                return;
+            };
+            match closing_outcome(store, &session, final_answer_text) {
+                Ok(SpawnOutcome::Reply(text)) => text,
+                Ok(SpawnOutcome::Failed(text)) => format!("Agent reported an error:\n{text}"),
+                Ok(SpawnOutcome::Interrupted) => {
+                    "The turn was interrupted before finishing.".to_string()
+                }
+                Ok(SpawnOutcome::Silent) | Err(_) => {
+                    "The agent finished without a written answer.".to_string()
+                }
+            }
+        }
+    };
+    if let Err(err) = crate::notify_events::enqueue_slack_reply(store, &item, &text) {
+        eprintln!("orx up: could not enqueue a Slack thread reply: {err}");
+    }
+}
+
+/// A Slack reply that has not reached its chat by then is given up on, and
+/// the thread is told.
+const SLACK_DELIVERY_DEADLINE: Duration = Duration::from_secs(15 * 60);
+
+/// Hand each Slack reply that passed intake (`slack_inbound`) to its chat,
+/// as a visible user message. A busy chat queues it like a message typed in
+/// the dashboard. The reply's inbox id is the turn's idempotency key, so a
+/// retry after a crash between sending and marking finds the same turn.
+async fn process_slack_inbox(
+    chat: &Arc<ChatHost>,
+    store: Store,
+    data_dir_move_in_progress: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<()> {
+    if data_dir_move_in_progress.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+    {
+        return Ok(());
+    }
+    for item in store.list_pending_slack_inbox(20)? {
+        let expired = now_ms() - item.received_at > SLACK_DELIVERY_DEADLINE.as_millis() as i64;
+        if store.get_chat_session(&item.chat_session_id)?.is_none() {
+            store.mark_slack_inbox_attempt_failed(&item.id, "chat session not found", true)?;
+            crate::notify_events::enqueue_slack_reply(
+                &store,
+                &item,
+                "That chat no longer exists in orx, so this reply went nowhere.",
+            )?;
+            continue;
+        }
+        let name = crate::slack_inbound::user_name(&item.user_id).await;
+        let text = format!(
+            "[via Slack from {name}]\n\n{}",
+            crate::slack_inbound::unescape(&item.text)
+        );
+        match chat
+            .send_message(
+                &item.chat_session_id,
+                text,
+                TurnOverrides::default(),
+                Vec::new(),
+                Vec::new(),
+                Some(format!("{SLACK_TURN_PREFIX}{}", item.id)),
+            )
+            .await
+        {
+            Ok(_) => {
+                store.mark_slack_inbox_delivered(&item.id)?;
+                if let Some((token, _)) = crate::config::slack_app().poster() {
+                    let _ = crate::slack_api::SlackApi::new(token)
+                        .add_reaction(&item.channel, &item.ts, "eyes")
+                        .await;
+                }
+            }
+            // Most often the chat is stopping or busy in another `orx up`;
+            // keep trying every pass until the deadline.
+            Err(err) => {
+                store.mark_slack_inbox_attempt_failed(&item.id, &err.to_string(), expired)?;
+                if expired {
+                    crate::notify_events::enqueue_slack_reply(
+                        &store,
+                        &item,
+                        &format!("orx could not deliver this reply to its chat: {err}"),
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Where the helper's work is. Deliberately claims no branch: session worktrees
 /// start detached, so a helper only has one if it ran `orx create-experiment`.
 fn spawn_workspace(store: &Store, session: &StoredChatSession) -> String {
@@ -8362,6 +8485,12 @@ pub async fn watch_runs(
             process_turn_resumes(&chat, store, Some(data_dir_move_in_progress.as_ref())).await
         {
             eprintln!("orx up: turn resume watcher: {err}");
+        }
+        let Ok(store) = Store::open() else { continue };
+        if let Err(err) =
+            process_slack_inbox(&chat, store, Some(data_dir_move_in_progress.as_ref())).await
+        {
+            eprintln!("orx up: Slack reply delivery: {err}");
         }
     }
 }

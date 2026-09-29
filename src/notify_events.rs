@@ -9,7 +9,7 @@
 //! config-gating check.
 //!
 //! **Enqueue-gated, not drain-gated**: both helpers check
-//! `telemetry::slack_event_settings()` and `config::slack_webhook_url()`
+//! `telemetry::slack_event_settings()` and `config::slack_can_post()`
 //! *before* calling `Store::enqueue_notification`, rather than always
 //! enqueueing and letting the drain loop (which skips every pass while no
 //! webhook is saved) sit on the rows until one is. Two reasons: a "job submitted" or "run synthesized"
@@ -131,7 +131,7 @@ fn payload(header: &str, details: &str) -> Value {
 }
 
 fn slack_ready(event_enabled: bool) -> bool {
-    event_enabled && crate::config::slack_webhook_url().is_some()
+    event_enabled && crate::config::slack_can_post()
 }
 
 /// Enqueue the "a run was submitted" notification, right after the launcher
@@ -165,9 +165,10 @@ pub fn enqueue_job_submitted(
     ) {
         details.push(format!("<{link}|Open in orx>"));
     }
-    store.enqueue_notification(
+    store.enqueue_session_notification(
         "job_submitted",
         Some(&run.id),
+        run.chat_session_id.as_deref(),
         &payload(&header, &details.join("\n")).to_string(),
     )?;
     Ok(())
@@ -214,9 +215,10 @@ pub fn enqueue_run_synthesized(
     ) {
         details.push(format!("<{link}|Open in orx>"));
     }
-    store.enqueue_notification(
+    store.enqueue_session_notification(
         "run_synthesized",
         Some(&run.id),
+        Some(&wakeup.chat_session_id),
         &payload(&header, &details.join("\n\n")).to_string(),
     )?;
     Ok(())
@@ -263,9 +265,10 @@ pub fn enqueue_run_stalled(
     ) {
         details.push(format!("<{link}|Open in orx>"));
     }
-    store.enqueue_notification(
+    store.enqueue_session_notification(
         "run_stalled",
         Some(&run.id),
+        run.chat_session_id.as_deref(),
         &payload(&header, &details.join("\n\n")).to_string(),
     )?;
     Ok(())
@@ -284,6 +287,35 @@ pub fn enqueue_digest(
 ) -> Result<String> {
     let header = format!("[{}] {title}", project.name);
     store.enqueue_notification(kind, None, &payload(&header, text.trim()).to_string())
+}
+
+/// Enqueue a message into the Slack thread `item` came from — the agent's
+/// answer to it, or word that it could not be delivered. Only the bot can
+/// post into a thread, so this is a no-op without one.
+pub fn enqueue_slack_reply(
+    store: &Store,
+    item: &crate::store::SlackInboxItem,
+    text: &str,
+) -> Result<()> {
+    if crate::config::slack_app().poster().is_none() {
+        return Ok(());
+    }
+    let payload = json!({
+        "text": text,
+        "blocks": [{
+            "type": "section",
+            "text": { "type": "mrkdwn", "text": slack_block_text(text) },
+        }],
+        "channel": item.channel,
+        "thread_ts": item.thread_ts,
+    });
+    store.enqueue_session_notification(
+        "slack_reply",
+        None,
+        Some(&item.chat_session_id),
+        &payload.to_string(),
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

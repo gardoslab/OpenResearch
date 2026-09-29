@@ -11,22 +11,32 @@
 //! a usage limit hit) is each feature's own job — see `notify_events` —
 //! as is where a webhook URL comes from (`config_dir()/slack.json`, the
 //! same shape as `overleaf.json` in `src/config.rs`). [`spawn_notifier_loop`]
-//! is started from `commands::up::run` and re-reads the webhook every pass,
-//! so saving or removing one in Settings takes effect without a restart.
+//! is started from `commands::up::run` and re-reads `slack.json` every pass,
+//! so saving or removing a webhook or bot token in Settings takes effect
+//! without a restart.
+//!
+//! With a bot token and channel saved, messages go out through
+//! `chat.postMessage` instead of the webhook. That call returns the
+//! message's `ts`, and a message enqueued for a chat session is recorded in
+//! `slack_messages` so a thread reply to it can find the chat again
+//! (`slack_inbound`).
 
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::store::Store;
+use crate::slack_api::{ApiError, Posted, SlackApi};
+use crate::store::{SlackThread, Store};
 
 /// How one delivery attempt turned out. A rejected payload (a revoked or
 /// disabled webhook, a malformed request) is pointless to retry; a network
 /// hiccup or a 5xx is worth trying again on the next drain pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `Sent` carries where the message landed when the provider can say
+/// (the bot can, a webhook cannot).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeliveryOutcome {
-    Sent,
+    Sent(Option<Posted>),
     Rejected,
     Retryable,
 }
@@ -79,13 +89,75 @@ impl NotificationProvider for SlackWebhookProvider {
             return DeliveryOutcome::Retryable;
         };
         if response.status().is_success() {
-            DeliveryOutcome::Sent
+            DeliveryOutcome::Sent(None)
         } else if matches!(response.status().as_u16(), 400 | 404 | 410) {
             // Slack answers a revoked/disabled webhook with 404 or 410, and
             // a malformed payload with 400 — none of those improve on retry.
             DeliveryOutcome::Rejected
         } else {
             DeliveryOutcome::Retryable
+        }
+    }
+}
+
+/// Posts as the Slack app's bot. A payload may name its own `channel` and
+/// `thread_ts` — a reply into a thread goes wherever that thread is, even
+/// after the configured channel changes.
+pub struct SlackBotProvider {
+    api: SlackApi,
+    channel: String,
+}
+
+impl SlackBotProvider {
+    pub fn new(api: SlackApi, channel: String) -> Self {
+        Self { api, channel }
+    }
+}
+
+#[async_trait]
+impl NotificationProvider for SlackBotProvider {
+    async fn send(&self, _kind: &str, payload: &Value) -> DeliveryOutcome {
+        let channel = payload["channel"].as_str().unwrap_or(&self.channel);
+        let text = payload["text"].as_str().unwrap_or_default();
+        let blocks = payload.get("blocks").filter(|blocks| blocks.is_array());
+        match self
+            .api
+            .post_message(channel, text, blocks, payload["thread_ts"].as_str())
+            .await
+        {
+            Ok(posted) => DeliveryOutcome::Sent(Some(posted)),
+            Err(ApiError::Rejected(_)) => DeliveryOutcome::Rejected,
+            Err(ApiError::Retryable(_)) => DeliveryOutcome::Retryable,
+        }
+    }
+}
+
+/// Whichever Slack transport is configured: the bot when it is, else the
+/// webhook. A thread reply only makes sense through the bot.
+pub struct SlackProvider {
+    bot: Option<SlackBotProvider>,
+    webhook: Option<SlackWebhookProvider>,
+}
+
+impl SlackProvider {
+    /// From what `slack.json` holds right now; `None` when nothing can post.
+    pub fn from_config() -> Option<Self> {
+        let bot = crate::config::slack_app()
+            .poster()
+            .map(|(token, channel)| SlackBotProvider::new(SlackApi::new(token), channel));
+        let webhook = crate::config::slack_webhook_url().map(SlackWebhookProvider::new);
+        (bot.is_some() || webhook.is_some()).then_some(Self { bot, webhook })
+    }
+}
+
+#[async_trait]
+impl NotificationProvider for SlackProvider {
+    async fn send(&self, kind: &str, payload: &Value) -> DeliveryOutcome {
+        match (&self.bot, &self.webhook) {
+            (Some(bot), _) => bot.send(kind, payload).await,
+            (None, _) if payload.get("thread_ts").is_some() => DeliveryOutcome::Rejected,
+            (None, Some(webhook)) => webhook.send(kind, payload).await,
+            (None, None) => DeliveryOutcome::Retryable,
         }
     }
 }
@@ -125,7 +197,25 @@ pub async fn drain_once(
             }
         };
         match provider.send(&notification.kind, &payload).await {
-            DeliveryOutcome::Sent => store.mark_notification_sent(&notification.id)?,
+            DeliveryOutcome::Sent(posted) => {
+                store.mark_notification_sent(&notification.id)?;
+                // Only a thread's parent is recorded: a reply anywhere in the
+                // thread carries the parent's ts as its `thread_ts`.
+                if let (Some(posted), Some(session_id), None) = (
+                    posted,
+                    notification.chat_session_id.as_deref(),
+                    payload.get("thread_ts"),
+                ) {
+                    store.record_slack_thread(&SlackThread {
+                        channel: posted.channel,
+                        ts: posted.ts,
+                        chat_session_id: session_id.to_string(),
+                        run_id: notification.run_id.clone(),
+                        kind: notification.kind.clone(),
+                        created_at: crate::store::now_ms(),
+                    })?;
+                }
+            }
             DeliveryOutcome::Rejected => {
                 store.mark_notification_attempt_failed(&notification.id, "rejected by provider")?
             }
@@ -139,8 +229,8 @@ pub async fn drain_once(
 }
 
 /// Drains the outbox on an interval for as long as `orx up` runs, through a
-/// Slack webhook provider built from whatever webhook is saved at that
-/// moment — none saved means the pass is skipped and rows wait. Exactly
+/// Slack provider built from whatever `slack.json` holds at that moment —
+/// nothing saved means the pass is skipped and rows wait. Exactly
 /// one of these should run per process — a detached `orx supervise` only
 /// ever enqueues (`Store::enqueue_notification`), never drains, so no two
 /// writers can race a send. Opens a fresh `Store` each tick (cheap: WAL
@@ -149,7 +239,7 @@ pub async fn drain_once(
 pub fn spawn_notifier_loop() {
     tokio::spawn(async move {
         loop {
-            let provider = crate::config::slack_webhook_url().map(SlackWebhookProvider::new);
+            let provider = SlackProvider::from_config();
             match (provider, Store::open()) {
                 (None, _) => {}
                 (Some(provider), Ok(store)) => {
@@ -197,7 +287,7 @@ mod tests {
                 .push((kind.to_string(), payload.clone()));
             let mut outcomes = self.outcomes.lock().unwrap();
             if outcomes.is_empty() {
-                DeliveryOutcome::Sent
+                DeliveryOutcome::Sent(None)
             } else {
                 outcomes.remove(0)
             }
@@ -233,6 +323,51 @@ mod tests {
                 serde_json::json!({"text": "hello"})
             )]
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_bot_posted_session_message_is_recorded_as_a_thread() {
+        let dir = temp_dir();
+        let store = open(&dir);
+        store
+            .enqueue_session_notification(
+                "run_synthesized",
+                Some("run_1"),
+                Some("chat_A"),
+                "{\"text\":\"done\"}",
+            )
+            .unwrap();
+        store
+            .enqueue_session_notification(
+                "slack_reply",
+                None,
+                Some("chat_A"),
+                "{\"text\":\"answer\",\"thread_ts\":\"1.0\"}",
+            )
+            .unwrap();
+        store
+            .enqueue_notification("digest_daily", None, "{\"text\":\"digest\"}")
+            .unwrap();
+        drop(store);
+        let posted = |ts: &str| {
+            DeliveryOutcome::Sent(Some(Posted {
+                channel: "C1".into(),
+                ts: ts.into(),
+            }))
+        };
+        let provider = ScriptedProvider::new(vec![posted("1.0"), posted("2.0"), posted("3.0")]);
+
+        drain_once(open(&dir), &provider).await.unwrap();
+
+        let store = open(&dir);
+        let thread = store.slack_thread("C1", "1.0").unwrap().unwrap();
+        assert_eq!(thread.chat_session_id, "chat_A");
+        assert_eq!(thread.run_id.as_deref(), Some("run_1"));
+        // Neither the reply inside a thread nor a session-less digest is one.
+        assert_eq!(store.slack_thread("C1", "2.0").unwrap(), None);
+        assert_eq!(store.slack_thread("C1", "3.0").unwrap(), None);
+        drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -337,7 +472,7 @@ mod tests {
         status.store(200, Ordering::SeqCst);
         assert_eq!(
             provider.send("preflight", &message).await,
-            DeliveryOutcome::Sent
+            DeliveryOutcome::Sent(None)
         );
 
         status.store(404, Ordering::SeqCst);

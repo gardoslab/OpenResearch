@@ -68,6 +68,7 @@ import {
   saveSlackWebhook,
   deleteSlackWebhook,
   setSlackEvents,
+  setSlackApp,
   slackPreflight,
   sendSlackDigest,
   saveOverleafSession,
@@ -101,6 +102,8 @@ import {
   type TelemetrySettings,
   type SlackSettings,
   type SlackEvents,
+  type SlackApp,
+  type SlackAppUpdate,
   type SlackPreflightResult,
   type SlackDigestReport,
   type Harness,
@@ -3268,19 +3271,155 @@ function TelemetryTab() {
   );
 }
 
+const EMPTY_SLACK_APP: SlackApp = { hasBotToken: false, hasAppToken: false, channelId: "", allowedUserIds: [], holdSocket: false };
+
+const SLACK_SOCKET_BADGES: Record<SlackSettings["socket"]["state"], BadgeVariant> = {
+  off: "default",
+  connecting: "warning",
+  connected: "success",
+  error: "error",
+};
+
+/** The Slack app half of Settings → Slack: tokens, channel, who may reply, and the Socket Mode connection. */
+function SlackAppSettings({ settings, onSaved }: { settings: SlackSettings; onSaved: (next: SlackSettings) => void }) {
+  const app = settings.app;
+  const [channelId, setChannelId] = useState(app.channelId);
+  const [allowed, setAllowed] = useState(app.allowedUserIds.join(", "));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const current = (): SlackAppUpdate => ({
+    channelId: app.channelId,
+    allowedUserIds: app.allowedUserIds,
+    holdSocket: app.holdSocket,
+  });
+  const save = (update: SlackAppUpdate) => setSlackApp(update);
+  const apply = (update: SlackAppUpdate) => {
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+    void save(update)
+      .then((next) => {
+        onSaved(next);
+        setChannelId(next.app.channelId);
+        setAllowed(next.app.allowedUserIds.join(", "));
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setSaving(false));
+  };
+  const allowedIds = allowed.split(/[\s,]+/).filter(Boolean);
+  const dirty = channelId.trim() !== app.channelId || allowedIds.join(",") !== app.allowedUserIds.join(",");
+  const tokenRow = (key: "botToken" | "appToken", has: boolean, label: string, placeholder: string) => (
+    <>
+      <div className={KV_CLASS_NAME}>
+        <span className="k">{label}</span>
+        <span className="v">
+          <Badge variant={has ? "success" : "default"}>{has ? m.settings_saved() : m.settings_not_set()}</Badge>
+        </span>
+      </div>
+      {has ? (
+        <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
+          <Button disabled={saving} onClick={() => apply({ ...current(), [key]: "" })}>
+            {saving ? m.settings_removing() : m.settings_page_slack_remove_token()}
+          </Button>
+        </div>
+      ) : (
+        <TokenForm
+          save={(token) => save({ ...current(), [key]: token })}
+          onSaved={onSaved}
+          placeholder={placeholder}
+          createHref="https://api.slack.com/apps"
+          createLabel={m.settings_page_slack_open_apps()}
+        />
+      )}
+    </>
+  );
+  const socket = settings.socket;
+  const socketLabel: Record<SlackSettings["socket"]["state"], string> = {
+    off: m.settings_page_slack_socket_off(),
+    connecting: m.settings_page_slack_socket_connecting(),
+    connected: m.settings_page_slack_socket_connected(),
+    error: m.settings_page_slack_socket_error(),
+  };
+
+  return (
+    <>
+      <h3 className="mt-4 text-base font-medium">{m.settings_page_slack_app_title()}</h3>
+      <p>{m.settings_page_slack_app_description()}</p>
+      {tokenRow("botToken", app.hasBotToken, m.settings_page_slack_bot_token(), "xoxb-…")}
+      {tokenRow("appToken", app.hasAppToken, m.settings_page_slack_app_token(), "xapp-…")}
+      <form
+        className="flex flex-col gap-2 mt-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          apply({ ...current(), channelId: channelId.trim(), allowedUserIds: allowedIds });
+        }}
+      >
+        <label className="flex flex-col gap-1 text-sm">
+          <span>{m.settings_page_slack_channel_id()}</span>
+          <Input value={channelId} onChange={(e) => setChannelId(e.target.value)} placeholder="C0123456789" autoComplete="off" />
+        </label>
+        <label className="flex flex-col gap-1 text-sm">
+          <span>{m.settings_page_slack_allowed_users()}</span>
+          <Input value={allowed} onChange={(e) => setAllowed(e.target.value)} placeholder="U0123456789, U0987654321" autoComplete="off" />
+          <span className="text-subtext">{m.settings_page_slack_allowed_users_hint()}</span>
+        </label>
+        <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
+          <Button type="submit" disabled={saving || !dirty}>
+            {saving ? m.common_saving() : m.common_save()}
+          </Button>
+        </div>
+      </form>
+      <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+        <div>
+          <div className="project-default-title text-base font-medium">{m.settings_page_slack_hold_socket_title()}</div>
+          <p>{m.settings_page_slack_hold_socket_description()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={app.holdSocket}
+          aria-label={m.settings_page_slack_hold_socket_title()}
+          disabled={saving}
+          onClick={() => apply({ ...current(), holdSocket: !app.holdSocket })}
+        />
+      </div>
+      {app.holdSocket && (
+        <div className={KV_CLASS_NAME}>
+          <span className="k">{m.settings_page_slack_socket()}</span>
+          <span className="v">
+            <Badge variant={SLACK_SOCKET_BADGES[socket.state]}>{socketLabel[socket.state]}</Badge>
+            {socket.error && <span className="ml-2 text-sm text-subtext">{socket.error}</span>}
+          </span>
+        </div>
+      )}
+      {app.holdSocket && app.allowedUserIds.length === 0 && (
+        <p className="text-sm text-subtext">{m.settings_page_slack_allowed_users_empty()}</p>
+      )}
+      {error && <div className="error">{error}</div>}
+    </>
+  );
+}
+
 function SlackSection() {
   const deleteWebhookMutation = useMutation({ mutationFn: deleteSlackWebhook });
   const setEventsMutation = useMutation({ mutationFn: setSlackEvents });
 
   const settingsOptions = getSlackSettingsQuery();
-  const settingsQuery = useQuery(settingsOptions);
+  // Poll while this machine holds the Socket Mode connection, so its status stays current.
+  const settingsQuery = useQuery({
+    ...settingsOptions,
+    refetchInterval: (query) => (query.state.data?.app.holdSocket ? 5000 : false),
+  });
   const settings = settingsQuery.data ?? null;
   const patch = (next: Partial<SlackSettings>) =>
     setScopedQueryData(settingsOptions.queryKey, {
       hasWebhook: settings?.hasWebhook ?? false,
+      app: settings?.app ?? EMPTY_SLACK_APP,
+      socket: settings?.socket ?? { state: "off", since: 0, error: null },
       events: settings?.events ?? { jobSubmitted: false, runSynthesized: false, runStalled: false, dailyDigest: false, weeklyDigest: false },
       ...next,
     });
+  const canPost = !!settings && (settings.hasWebhook || (settings.app.hasBotToken && settings.app.channelId !== ""));
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [sendingDigest, setSendingDigest] = useState<"daily" | "weekly" | null>(null);
@@ -3309,7 +3448,7 @@ function SlackSection() {
 
   const runTest = () => {
     // No persisted state to render for a one-off probe; report through a toast instead.
-    if (!settings?.hasWebhook || testing) return;
+    if (!canPost || testing) return;
     setTesting(true);
     void slackPreflight()
       .then((result: SlackPreflightResult) => {
@@ -3320,7 +3459,7 @@ function SlackSection() {
   };
 
   const sendDigest = (kind: "daily" | "weekly") => {
-    if (!settings?.hasWebhook || sendingDigest) return;
+    if (!canPost || sendingDigest) return;
     setSendingDigest(kind);
     void sendSlackDigest(kind)
       .then((report: SlackDigestReport) => {
@@ -3371,6 +3510,7 @@ function SlackSection() {
               createHref="https://api.slack.com/messaging/webhooks"
             />
           )}
+          <SlackAppSettings settings={settings} onSaved={(next) => patch(next)} />
           <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
             <div>
               <div className="project-default-title text-base font-medium">{m.settings_page_slack_job_submitted_title()}</div>
@@ -3437,13 +3577,13 @@ function SlackSection() {
             />
           </div>
           <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
-            <Button disabled={!settings.hasWebhook || testing} onClick={runTest}>
+            <Button disabled={!canPost || testing} onClick={runTest}>
               {testing ? m.settings_page_testing() : m.settings_page_slack_test()}
             </Button>
-            <Button disabled={!settings.hasWebhook || sendingDigest !== null} onClick={() => sendDigest("daily")}>
+            <Button disabled={!canPost || sendingDigest !== null} onClick={() => sendDigest("daily")}>
               {sendingDigest === "daily" ? m.settings_page_slack_digest_sending() : m.settings_page_slack_send_daily_digest()}
             </Button>
-            <Button disabled={!settings.hasWebhook || sendingDigest !== null} onClick={() => sendDigest("weekly")}>
+            <Button disabled={!canPost || sendingDigest !== null} onClick={() => sendDigest("weekly")}>
               {sendingDigest === "weekly" ? m.settings_page_slack_digest_sending() : m.settings_page_slack_send_weekly_digest()}
             </Button>
           </div>
