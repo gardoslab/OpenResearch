@@ -165,11 +165,12 @@ fn manual(mut due: Due) -> Due {
 /// Everything a digest is written from, already rendered as plain text.
 #[derive(Debug, Default)]
 struct DigestContext {
-    /// The last digest posted for this project, with a header saying when.
+    /// The last digest Slack accepted for this project, with a header saying
+    /// when.
     previous_digest: Option<String>,
-    /// Whether finished runs and messages after the previous digest carry a
-    /// `[new]` marker. False when there was none, or it predates the window,
-    /// so everything is new.
+    /// Whether finished runs and messages past the previous digest's material
+    /// carry a `[new]` marker. False when there was none, or it ends before
+    /// the window, so everything in the window is new.
     marks_new: bool,
     active_runs: Vec<String>,
     finished_runs: Vec<String>,
@@ -198,12 +199,23 @@ impl DigestContext {
             Some(previous) => previous.clone(),
             None => "## Previous digest\n(none)\n".to_string(),
         };
-        let freshness = if self.marks_new {
-            "Runs and messages marked [new] came after the previous digest; the rest were \
-             already there when it was written."
-        } else {
-            "Everything below came after the previous digest."
+        let freshness = match (&self.previous_digest, self.marks_new) {
+            (None, _) => {
+                "There is no previous digest, so everything in the two \"in this period\" \
+                 sections is new."
+            }
+            (Some(_), true) => {
+                "In the two \"in this period\" sections, entries marked [new] came after \
+                 the previous digest; unmarked ones were already in its material."
+            }
+            (Some(_), false) => {
+                "Everything in the two \"in this period\" sections came after the previous \
+                 digest."
+            }
         };
+        let freshness = format!(
+            "{freshness} Runs in flight and results of earlier runs are background, not news."
+        );
         format!(
             "{previous}\n{freshness}\n\n{}\n{}\n{}\n{}",
             section("Runs in flight", &self.active_runs),
@@ -240,11 +252,11 @@ fn gather(
     digest_sessions: &HashSet<String>,
 ) -> Result<DigestContext> {
     let mut context = DigestContext::default();
-    let previous = store.last_posted_digest(&project.id)?;
+    let previous = store.last_delivered_digest(&project.id)?;
     let since_ms = previous
         .as_ref()
-        .map(|(_, _, posted_at)| *posted_at)
-        .filter(|posted_at| *posted_at > due.window_start_ms);
+        .map(|previous| previous.covered_until)
+        .filter(|covered_until| *covered_until > due.window_start_ms);
     context.marks_new = since_ms.is_some();
     let new_tag = |ms: i64| {
         if since_ms.is_some_and(|since| ms >= since) {
@@ -253,11 +265,12 @@ fn gather(
             ""
         }
     };
-    if let Some((kind, text, posted_at)) = previous {
+    if let Some(previous) = previous {
         context.previous_digest = Some(format!(
-            "## Previous digest ({kind}, posted {})\n{}\n",
-            local_date(posted_at),
-            truncated(text.trim(), PREVIOUS_DIGEST_CHARS)
+            "## Previous digest ({}, posted {})\n{}\n",
+            previous.kind,
+            local_date(previous.sent_at),
+            truncated(previous.text.trim(), PREVIOUS_DIGEST_CHARS)
         ));
     }
 
@@ -299,8 +312,9 @@ fn gather(
                         run.status,
                         local_date(ended)
                     );
-                    if line.len() <= earlier_budget {
-                        earlier_budget -= line.len();
+                    let chars = line.chars().count();
+                    if chars <= earlier_budget {
+                        earlier_budget -= chars;
                         context.earlier_results.push(line);
                     }
                 }
@@ -348,10 +362,11 @@ fn gather(
         }
         let title = session.title.as_deref().unwrap_or("Untitled chat");
         let block = truncated(&format!("### {title}\n{}", lines.join("\n")), SESSION_CHARS);
-        if block.len() > budget {
+        let chars = block.chars().count();
+        if chars > budget {
             break;
         }
-        budget -= block.len();
+        budget -= chars;
         context.conversations.push(block);
     }
     Ok(context)
@@ -366,10 +381,10 @@ const DAILY_SYSTEM: &str = "You write a short morning digest for a research proj
     and conversations with its research agents, and results of earlier runs. Report only \
     what is in the material; never invent results or scores.";
 
-const KEY_LEARNING: &str = "*Key learning* — what the runs and conversations since the \
-    previous digest established: results, conclusions, approaches ruled out. Don't repeat \
-    what the previous digest already said. 1–3 lines; if nothing new was learned, say so \
-    in one line.";
+const KEY_LEARNING: &str = "*Key learning* — what the new runs and conversations (those \
+    marked [new], or the whole period if nothing is marked) established: results, \
+    conclusions, approaches ruled out. Don't repeat what the previous digest already said. \
+    1–3 lines; if nothing new was learned, say so in one line.";
 
 const BEST_SO_FAR: &str = "*Best so far* — the best model so far on the project's headline \
     metric (F1 Macro where reported): name it and give its score, then a line or two of \
@@ -532,14 +547,14 @@ async fn daily(project: &LocalProject, due: &Due) -> Result<Outcome> {
     let store = Store::open()?;
     match text.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
         Some(text) => {
-            crate::notify_events::enqueue_digest(
+            let notification_id = crate::notify_events::enqueue_digest(
                 &store,
                 project,
                 DigestKind::Daily.notification_kind(),
                 &due.title,
                 &text,
             )?;
-            store.finish_digest(&row, &text)?;
+            store.finish_digest(&row, &text, due.window_end_ms, &notification_id)?;
             Ok(Outcome::Sent)
         }
         None => {
@@ -700,17 +715,20 @@ async fn advance_weekly(chat: &Arc<ChatHost>) -> Result<()> {
         };
         match closing_outcome(&store, &session, final_answer_text)? {
             SpawnOutcome::Reply(text) => {
-                let title = weekly_due_for(&row.period, &jiff::tz::TimeZone::system())
-                    .map(|due| due.title)
+                let due = weekly_due_for(&row.period, &jiff::tz::TimeZone::system());
+                let title = due
+                    .as_ref()
+                    .map(|due| due.title.clone())
                     .unwrap_or_else(|| "Weekly digest".to_string());
-                crate::notify_events::enqueue_digest(
+                let covered_until = due.map(|due| due.window_end_ms).unwrap_or_else(now_ms);
+                let notification_id = crate::notify_events::enqueue_digest(
                     &store,
                     &project,
                     kind.notification_kind(),
                     &title,
                     &text,
                 )?;
-                store.finish_digest(&row, &text)?;
+                store.finish_digest(&row, &text, covered_until, &notification_id)?;
             }
             _ => {
                 store.set_digest_state(&row, "running", "failed")?;
@@ -892,23 +910,33 @@ mod tests {
     }
 
     #[test]
-    fn a_posted_digest_is_kept_for_the_next_one() {
+    fn only_a_delivered_digest_counts_as_the_previous_one() {
         let dir = std::env::temp_dir().join(format!("orx-digest-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
-        assert_eq!(store.last_posted_digest("p1").unwrap(), None);
-        store
-            .claim_digest("p1", "daily", "2026-09-24", "running", None)
-            .unwrap();
-        let row = store
-            .get_digest("p1", "daily", "2026-09-24")
-            .unwrap()
-            .unwrap();
-        assert!(store.finish_digest(&row, "*Best so far* — resnet").unwrap());
-        assert!(!store.finish_digest(&row, "again").unwrap());
-        let (kind, text, _) = store.last_posted_digest("p1").unwrap().unwrap();
-        assert_eq!(kind, "daily");
-        assert_eq!(text, "*Best so far* — resnet");
-        assert_eq!(store.last_posted_digest("p2").unwrap(), None);
+        let finish = |period: &str, text: &str, covered_until: i64| {
+            store
+                .claim_digest("p1", "daily", period, "running", None)
+                .unwrap();
+            let row = store.get_digest("p1", "daily", period).unwrap().unwrap();
+            let id = store
+                .enqueue_notification("digest_daily", None, "{}")
+                .unwrap();
+            assert!(store.finish_digest(&row, text, covered_until, &id).unwrap());
+            assert!(!store.finish_digest(&row, text, covered_until, &id).unwrap());
+            id
+        };
+
+        let delivered = finish("2026-09-23", "*Best so far* — resnet", 1_000);
+        assert_eq!(store.last_delivered_digest("p1").unwrap(), None);
+        store.mark_notification_sent(&delivered).unwrap();
+
+        // Covers later material, but Slack never accepted it.
+        finish("2026-09-24", "undelivered", 2_000);
+        let previous = store.last_delivered_digest("p1").unwrap().unwrap();
+        assert_eq!(previous.kind, "daily");
+        assert_eq!(previous.text, "*Best so far* — resnet");
+        assert_eq!(previous.covered_until, 1_000);
+        assert_eq!(store.last_delivered_digest("p2").unwrap(), None);
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
