@@ -69,6 +69,17 @@ function run(command, args, options = {}) {
   return execFileSync(command, args, { encoding: 'utf8', ...options }).trim()
 }
 
+/**
+ * The checkout that holds the shared slot registry. Upstream keeps `main` in
+ * the primary folder, so that worktree wins when one exists. A fork that works
+ * from `dev` may have `main` checked out nowhere; fall back to the repository's
+ * primary working tree, which `git worktree list` always prints first.
+ */
+export function primaryWorktree(records) {
+  return records.find((record) => record.branch === 'refs/heads/main')
+    ?? records.find((record) => record.worktree && !record.bare)
+}
+
 function worktreeInfo(worktreeInput) {
   const worktreePath = realpathSync(worktreeInput)
   const manifestPath = path.join(worktreePath, 'Cargo.toml')
@@ -80,15 +91,15 @@ function worktreeInfo(worktreeInput) {
       const split = line.indexOf(' ')
       return split === -1 ? [line, true] : [line.slice(0, split), line.slice(split + 1)]
     })))
-  const mainWorktrees = records.filter((record) => record.branch === 'refs/heads/main')
-  if (mainWorktrees.length !== 1) throw new Error('Expected exactly one worktree on refs/heads/main')
+  const primary = primaryWorktree(records)
+  if (!primary) throw new Error(`No checked-out worktree found for ${worktreePath}`)
 
   return {
     worktreePath,
     manifestPath,
     worktreeKey: createHash('sha256').update(worktreePath).digest('hex').slice(0, 16),
     label: path.basename(worktreePath).replaceAll(/[^a-zA-Z0-9._-]/g, '-'),
-    mainCheckout: realpathSync(mainWorktrees[0].worktree),
+    mainCheckout: realpathSync(primary.worktree),
   }
 }
 
