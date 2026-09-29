@@ -259,6 +259,12 @@ async fn run_connection(app: &SlackApp) -> Ended {
                 let Ok(envelope) = serde_json::from_str::<Value>(&text) else { continue };
                 match envelope["type"].as_str() {
                     Some("hello") => {
+                        // More than one means another orx (or anything else
+                        // holding this app's token) is splitting the events.
+                        eprintln!(
+                            "orx up: Slack Socket Mode connected ({} open connection(s) for this app)",
+                            envelope["num_connections"].as_u64().unwrap_or(1)
+                        );
                         set_status("connected", None);
                         let app = app.clone();
                         tokio::spawn(async move { backfill(&app).await });
@@ -270,12 +276,24 @@ async fn run_connection(app: &SlackApp) -> Ended {
                 if envelope["type"].as_str() == Some("events_api") {
                     let event = &envelope["payload"]["event"];
                     let taken = Store::open().and_then(|store| intake(&store, &app.allowed_user_ids, event));
-                    if let Err(err) = taken {
-                        // No ack: Slack retries the event, and the retry may
-                        // find the store writable again.
-                        eprintln!("orx up: could not take in a Slack event: {err}");
-                        continue;
+                    match taken {
+                        Ok(intake) => eprintln!(
+                            "orx up: Slack event {} in {}: {intake:?}",
+                            event["type"].as_str().unwrap_or("?"),
+                            event["channel"].as_str().unwrap_or("?"),
+                        ),
+                        Err(err) => {
+                            // No ack: Slack retries the event, and the retry
+                            // may find the store writable again.
+                            eprintln!("orx up: could not take in a Slack event: {err}");
+                            continue;
+                        }
                     }
+                } else {
+                    eprintln!(
+                        "orx up: Slack envelope {} acknowledged without action",
+                        envelope["type"].as_str().unwrap_or("?")
+                    );
                 }
                 let ack = json!({ "envelope_id": envelope_id }).to_string();
                 if sink.send(Message::Text(ack.into())).await.is_err() {
