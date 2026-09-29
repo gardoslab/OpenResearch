@@ -330,6 +330,16 @@ pub struct StoredDigest {
     pub started_at: Option<i64>,
 }
 
+/// A digest Slack accepted, as the next digest sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveredDigest {
+    pub kind: String,
+    pub text: String,
+    /// End of the window its material was read from.
+    pub covered_until: i64,
+    pub sent_at: i64,
+}
+
 const DIGEST_COLS: &str = "project_id, kind, period, state, session_id, attempts, started_at";
 
 fn row_to_digest(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredDigest> {
@@ -707,6 +717,9 @@ impl Store {
                 attempts    INTEGER NOT NULL DEFAULT 0,
                 created_at  INTEGER NOT NULL,
                 started_at  INTEGER,
+                text        TEXT,
+                covered_until   INTEGER,
+                notification_id TEXT,
                 PRIMARY KEY (project_id, kind, period)
             );
             CREATE TABLE IF NOT EXISTS ui_state (
@@ -763,6 +776,9 @@ impl Store {
             "ALTER TABLE chat_run_wakeups ADD COLUMN pre_turn_description TEXT",
             "ALTER TABLE notifications_outbox ADD COLUMN run_id TEXT",
             "ALTER TABLE notifications_outbox ADD COLUMN chat_session_id TEXT",
+            "ALTER TABLE slack_digests ADD COLUMN text TEXT",
+            "ALTER TABLE slack_digests ADD COLUMN covered_until INTEGER",
+            "ALTER TABLE slack_digests ADD COLUMN notification_id TEXT",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -1602,6 +1618,58 @@ impl Store {
             ],
         )?;
         Ok(changed == 1)
+    }
+
+    /// Marks a running digest `done` and keeps what it said, how far its
+    /// material reached (`covered_until`), and the outbox row carrying it, so
+    /// the next digest can say what changed since this one.
+    pub fn finish_digest(
+        &self,
+        digest: &StoredDigest,
+        text: &str,
+        covered_until: i64,
+        notification_id: &str,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE slack_digests
+             SET state = 'done', text = ?4, covered_until = ?5, notification_id = ?6
+             WHERE project_id = ?1 AND kind = ?2 AND period = ?3 AND state = 'running'",
+            params![
+                digest.project_id,
+                digest.kind,
+                digest.period,
+                text,
+                covered_until,
+                notification_id
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// The project's latest digest of either kind that Slack actually
+    /// accepted: one whose delivery failed was never read, so it must not
+    /// count as already reported.
+    pub fn last_delivered_digest(&self, project_id: &str) -> Result<Option<DeliveredDigest>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT d.kind, d.text, d.covered_until, o.sent_at
+                 FROM slack_digests d
+                 JOIN notifications_outbox o ON o.id = d.notification_id
+                 WHERE d.project_id = ?1 AND d.state = 'done' AND d.text IS NOT NULL
+                   AND d.covered_until IS NOT NULL AND o.sent_at IS NOT NULL
+                 ORDER BY d.covered_until DESC LIMIT 1",
+                params![project_id],
+                |row| {
+                    Ok(DeliveredDigest {
+                        kind: row.get(0)?,
+                        text: row.get(1)?,
+                        covered_until: row.get(2)?,
+                        sent_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// Counts a failed try and returns the new total.
