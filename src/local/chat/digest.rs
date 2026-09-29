@@ -10,6 +10,10 @@
 //!   Monday gets the weekly only: it already covers everything the daily
 //!   would, and two posts in the same minute is the noise we're avoiding.
 //!
+//! Both also report the key learning since the previous digest and a running
+//! "best so far" commentary on the headline metric. The posted text is kept on
+//! its row so the next digest can build on it.
+//!
 //! Each `(project, kind, period)` is a row in `slack_digests`, inserted as the
 //! claim, so a restart or a second tick never posts twice. A missed 9am
 //! (laptop asleep, `orx up` down) posts once on the next tick the same day;
@@ -46,6 +50,11 @@ const MESSAGE_CHARS: usize = 600;
 const SESSION_CHARS: usize = 3000;
 const CONTEXT_CHARS: usize = 20_000;
 const MAX_SESSIONS: usize = 12;
+/// Per run result, and overall for results from before the window: enough
+/// to keep the scores the "Best so far" commentary is built from.
+const RESULT_CHARS: usize = 800;
+const EARLIER_RESULTS_CHARS: usize = 8000;
+const PREVIOUS_DIGEST_CHARS: usize = 2000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DigestKind {
@@ -156,9 +165,18 @@ fn manual(mut due: Due) -> Due {
 /// Everything a digest is written from, already rendered as plain text.
 #[derive(Debug, Default)]
 struct DigestContext {
+    /// The last digest posted for this project, with a header saying when.
+    previous_digest: Option<String>,
+    /// Whether finished runs and messages after the previous digest carry a
+    /// `[new]` marker. False when there was none, or it predates the window,
+    /// so everything is new.
+    marks_new: bool,
     active_runs: Vec<String>,
     finished_runs: Vec<String>,
     conversations: Vec<String>,
+    /// Results of runs that finished before the window: history for the
+    /// "Best so far" commentary, not news, so it never makes a digest due.
+    earlier_results: Vec<String>,
 }
 
 impl DigestContext {
@@ -176,13 +194,34 @@ impl DigestContext {
                 format!("## {title}\n{}\n", items.join("\n"))
             }
         };
+        let previous = match &self.previous_digest {
+            Some(previous) => previous.clone(),
+            None => "## Previous digest\n(none)\n".to_string(),
+        };
+        let freshness = if self.marks_new {
+            "Runs and messages marked [new] came after the previous digest; the rest were \
+             already there when it was written."
+        } else {
+            "Everything below came after the previous digest."
+        };
         format!(
-            "{}\n{}\n{}",
+            "{previous}\n{freshness}\n\n{}\n{}\n{}\n{}",
             section("Runs in flight", &self.active_runs),
             section("Runs finished in this period", &self.finished_runs),
             section("Conversations in this period", &self.conversations),
+            section("Results of earlier runs", &self.earlier_results),
         )
     }
+}
+
+fn local_date(ms: i64) -> String {
+    jiff::Timestamp::from_millisecond(ms)
+        .map(|t| {
+            t.to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%a %b %-d")
+                .to_string()
+        })
+        .unwrap_or_default()
 }
 
 fn hours_since(ms: i64) -> String {
@@ -201,6 +240,28 @@ fn gather(
     digest_sessions: &HashSet<String>,
 ) -> Result<DigestContext> {
     let mut context = DigestContext::default();
+    let previous = store.last_posted_digest(&project.id)?;
+    let since_ms = previous
+        .as_ref()
+        .map(|(_, _, posted_at)| *posted_at)
+        .filter(|posted_at| *posted_at > due.window_start_ms);
+    context.marks_new = since_ms.is_some();
+    let new_tag = |ms: i64| {
+        if since_ms.is_some_and(|since| ms >= since) {
+            "[new] "
+        } else {
+            ""
+        }
+    };
+    if let Some((kind, text, posted_at)) = previous {
+        context.previous_digest = Some(format!(
+            "## Previous digest ({kind}, posted {})\n{}\n",
+            local_date(posted_at),
+            truncated(text.trim(), PREVIOUS_DIGEST_CHARS)
+        ));
+    }
+
+    let mut earlier_budget = EARLIER_RESULTS_CHARS;
     for run in store.list_runs_by_project(&project.id)? {
         let experiment = store
             .get_local_experiment(&run.experiment_id)?
@@ -219,17 +280,29 @@ fn gather(
             )),
             _ => {
                 let ended = run.ended_at.unwrap_or(run.updated_at);
+                let result = run
+                    .result_markdown
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|r| !r.is_empty())
+                    .map(|r| format!(": {}", truncated(r, RESULT_CHARS)));
                 if (due.window_start_ms..due.window_end_ms).contains(&ended) {
-                    let result = run
-                        .result_markdown
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|r| !r.is_empty())
-                        .map(|r| format!(": {}", truncated(r, 300)))
-                        .unwrap_or_default();
-                    context
-                        .finished_runs
-                        .push(format!("- {experiment}{job} \u{b7} {}{result}", run.status));
+                    context.finished_runs.push(format!(
+                        "- {}{experiment}{job} \u{b7} {}{}",
+                        new_tag(ended),
+                        run.status,
+                        result.unwrap_or_default()
+                    ));
+                } else if let Some(result) = result.filter(|_| ended < due.window_start_ms) {
+                    let line = format!(
+                        "- {experiment}{job} \u{b7} {} \u{b7} {}{result}",
+                        run.status,
+                        local_date(ended)
+                    );
+                    if line.len() <= earlier_budget {
+                        earlier_budget -= line.len();
+                        context.earlier_results.push(line);
+                    }
                 }
             }
         }
@@ -263,7 +336,11 @@ fn gather(
             };
             let text = text.trim();
             if !text.is_empty() {
-                lines.push(format!("{who}: {}", truncated(text, MESSAGE_CHARS)));
+                lines.push(format!(
+                    "{}{who}: {}",
+                    new_tag(message.created_at),
+                    truncated(text, MESSAGE_CHARS)
+                ));
             }
         }
         if lines.is_empty() {
@@ -285,19 +362,33 @@ const SLACK_STYLE: &str = "Write Slack mrkdwn, not Markdown: *bold* (single aste
     Plain, direct sentences; no greeting, preamble, sign-off, or filler.";
 
 const DAILY_SYSTEM: &str = "You write a short morning digest for a research project's \
-    Slack channel. You are given its runs in flight and this week's conversations with its \
-    research agents. Report only what is in the material; never invent results.";
+    Slack channel. You are given the previous digest, its runs in flight, this week's runs \
+    and conversations with its research agents, and results of earlier runs. Report only \
+    what is in the material; never invent results or scores.";
+
+const KEY_LEARNING: &str = "*Key learning* — what the runs and conversations since the \
+    previous digest established: results, conclusions, approaches ruled out. Don't repeat \
+    what the previous digest already said. 1–3 lines; if nothing new was learned, say so \
+    in one line.";
+
+const BEST_SO_FAR: &str = "*Best so far* — the best model so far on the project's headline \
+    metric (F1 Macro where reported): name it and give its score, then a line or two of \
+    running commentary on how the other contenders compare (with their scores) and whether \
+    the newest results changed the lead. Take scores only from the material, including the \
+    previous digest; if none are reported, say so in one line.";
 
 fn daily_prompt(project: &LocalProject, context: &DigestContext) -> String {
     format!(
         "Project: {name}\n\n{material}\n\
-         Write the digest with at most two sections:\n\
+         Write the digest with these sections, in order:\n\
+         {KEY_LEARNING}\n\
+         {BEST_SO_FAR}\n\
          *Running now* — one line per run in flight: what it is and how long it has run. \
          Omit the section if nothing is running.\n\
          *Next steps* — the open next steps from these conversations: things proposed, \
          planned, or asked for that the conversations don't show as done. One line each, \
          most important first, at most 6. Omit the section if there are none.\n\
-         Keep the whole digest under 12 lines. {SLACK_STYLE} \
+         Keep the whole digest under 18 lines. {SLACK_STYLE} \
          Reply with the digest only.",
         name = project.name,
         material = context.render(),
@@ -309,9 +400,11 @@ fn weekly_prompt(project: &LocalProject, due: &Due, context: &DigestContext) -> 
         "[orx] Write this week's Slack digest for the project \"{name}\" ({title}). \
          Your final message is posted to Slack verbatim, so it must contain only the digest.\n\n\
          Material from orx for last week:\n\n{material}\n\
-         Sections, in order, each omitted if empty:\n\
+         Sections, in order, each omitted if empty unless it says otherwise:\n\
          *Last week* — what was tried and what came of it, from the runs and conversations \
          above. 2–5 lines.\n\
+         {KEY_LEARNING}\n\
+         {BEST_SO_FAR}\n\
          *Running now* — one line per run in flight.\n\
          *Next steps* — open next steps the conversations proposed and don't show as done. \
          At most 6, most important first.\n\
@@ -446,7 +539,7 @@ async fn daily(project: &LocalProject, due: &Due) -> Result<Outcome> {
                 &due.title,
                 &text,
             )?;
-            store.set_digest_state(&row, "running", "done")?;
+            store.finish_digest(&row, &text)?;
             Ok(Outcome::Sent)
         }
         None => {
@@ -617,7 +710,7 @@ async fn advance_weekly(chat: &Arc<ChatHost>) -> Result<()> {
                     &title,
                     &text,
                 )?;
-                store.set_digest_state(&row, "running", "done")?;
+                store.finish_digest(&row, &text)?;
             }
             _ => {
                 store.set_digest_state(&row, "running", "failed")?;
@@ -794,6 +887,28 @@ mod tests {
             .unwrap();
         assert!(store.set_digest_state(&row, "running", "done").unwrap());
         assert!(!store.set_digest_state(&row, "running", "done").unwrap());
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_posted_digest_is_kept_for_the_next_one() {
+        let dir = std::env::temp_dir().join(format!("orx-digest-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert_eq!(store.last_posted_digest("p1").unwrap(), None);
+        store
+            .claim_digest("p1", "daily", "2026-09-24", "running", None)
+            .unwrap();
+        let row = store
+            .get_digest("p1", "daily", "2026-09-24")
+            .unwrap()
+            .unwrap();
+        assert!(store.finish_digest(&row, "*Best so far* — resnet").unwrap());
+        assert!(!store.finish_digest(&row, "again").unwrap());
+        let (kind, text, _) = store.last_posted_digest("p1").unwrap().unwrap();
+        assert_eq!(kind, "daily");
+        assert_eq!(text, "*Best so far* — resnet");
+        assert_eq!(store.last_posted_digest("p2").unwrap(), None);
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

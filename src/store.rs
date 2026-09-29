@@ -647,6 +647,8 @@ impl Store {
                 attempts    INTEGER NOT NULL DEFAULT 0,
                 created_at  INTEGER NOT NULL,
                 started_at  INTEGER,
+                text        TEXT,
+                posted_at   INTEGER,
                 PRIMARY KEY (project_id, kind, period)
             );
             CREATE TABLE IF NOT EXISTS ui_state (
@@ -702,6 +704,8 @@ impl Store {
             "ALTER TABLE chat_run_wakeups ADD COLUMN turn_id TEXT",
             "ALTER TABLE chat_run_wakeups ADD COLUMN pre_turn_description TEXT",
             "ALTER TABLE notifications_outbox ADD COLUMN run_id TEXT",
+            "ALTER TABLE slack_digests ADD COLUMN text TEXT",
+            "ALTER TABLE slack_digests ADD COLUMN posted_at INTEGER",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -1528,6 +1532,39 @@ impl Store {
             ],
         )?;
         Ok(changed == 1)
+    }
+
+    /// Marks a running digest `done` and keeps what was posted, so the next
+    /// digest can say what changed since this one.
+    pub fn finish_digest(&self, digest: &StoredDigest, text: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE slack_digests SET state = 'done', text = ?4, posted_at = ?5
+             WHERE project_id = ?1 AND kind = ?2 AND period = ?3 AND state = 'running'",
+            params![
+                digest.project_id,
+                digest.kind,
+                digest.period,
+                text,
+                now_ms()
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// The project's most recently posted digest of either kind, as
+    /// `(kind, text, posted_at)`.
+    pub fn last_posted_digest(&self, project_id: &str) -> Result<Option<(String, String, i64)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT kind, text, posted_at FROM slack_digests
+                 WHERE project_id = ?1 AND state = 'done'
+                   AND text IS NOT NULL AND posted_at IS NOT NULL
+                 ORDER BY posted_at DESC LIMIT 1",
+                params![project_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?)
     }
 
     /// Counts a failed try and returns the new total.
