@@ -64,6 +64,7 @@ import {
   fmtNumber,
   setComputeDefault,
   setProjectDefaults,
+  setDefaultProjectLocation,
   setTelemetry,
   saveSlackWebhook,
   deleteSlackWebhook,
@@ -3693,6 +3694,8 @@ function ProjectDefaultsTab({ remote }: { remote: boolean }) {
       {!settings ? (
         error ? <div className="error">{error}</div> : <LoadingRow><Spinner /> {m.settings_page_loading()}</LoadingRow>
       ) : (
+        <>
+        <ProjectLocationCard location={settings.defaultProjectLocation} onSaved={setSettings} />
         <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3 project-defaults-card [&_.settings-card-head]:justify-between [&_.settings-card-head]:mb-0 [&_.settings-card-head]:pb-3 [&_.settings-card-head_h3]:m-0`}>
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
             <h3>{m.settings_page_git_hub_publishing()}</h3>
@@ -3723,8 +3726,63 @@ function ProjectDefaultsTab({ remote }: { remote: boolean }) {
           <CommandRunTerminal run={gh.run} onComplete={() => void load()} onClose={gh.clear} />
           {error && <div className="error">{error}</div>}
         </div>
+        </>
       )}
     </>
+  );
+}
+
+/** Where new projects (blank, paper, cloned) default to. Kept off `$HOME` on
+ * clusters with small home quotas, such as the SCC. */
+function ProjectLocationCard({
+  location,
+  onSaved,
+}: {
+  location: string;
+  onSaved: (settings: ProjectDefaultsSettings) => void;
+}) {
+  const [draft, setDraft] = useState(location);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => setDraft(location), [location]);
+  const unchanged = draft.trim() === location;
+
+  const save = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (saving || unchanged) return;
+    setSaving(true);
+    setError(null);
+    void setDefaultProjectLocation(draft.trim())
+      .then(onSaved)
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setSaving(false));
+  };
+
+  return (
+    <form className={`${SETTINGS_CARD_CLASS_NAME} mt-3 flex flex-col gap-3`} onSubmit={save}>
+      <div>
+        <h3 className="m-0">{m.settings_default_project_location()}</h3>
+        <p className="mt-[3px] mb-0 text-sm leading-relaxed text-text">{m.settings_default_project_location_help()}</p>
+      </div>
+      <div className="flex items-center gap-2">
+        <Input
+          type="text"
+          className="flex-1"
+          value={draft}
+          disabled={saving}
+          onChange={(event) => setDraft(event.target.value)}
+          placeholder="~/OpenResearch"
+          aria-label={m.settings_default_project_location()}
+          autoComplete="off"
+          spellCheck={false}
+          dir="ltr"
+        />
+        <Button variant="primary" type="submit" disabled={saving || unchanged}>
+          {saving ? m.common_saving() : m.common_save()}
+        </Button>
+      </div>
+      {error && <p className="m-0 text-sm text-accent-red whitespace-pre-wrap break-words">{error}</p>}
+    </form>
   );
 }
 

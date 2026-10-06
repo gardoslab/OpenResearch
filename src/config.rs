@@ -443,6 +443,21 @@ pub fn set_auto_continue_on_limit_enabled(enabled: bool) -> Result<()> {
     Ok(())
 }
 
+/// Default parent folder for new projects. Lives in the telemetry-owned
+/// `settings.json` like the other project defaults.
+pub const DEFAULT_PROJECT_LOCATION: &str = "~/OpenResearch";
+
+pub fn default_project_location() -> String {
+    crate::telemetry::default_project_location()
+        .filter(|location| !location.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_PROJECT_LOCATION.to_string())
+}
+
+pub fn set_default_project_location(location: Option<String>) -> Result<()> {
+    crate::telemetry::set_default_project_location(location)?;
+    Ok(())
+}
+
 pub fn github_default_prompt_seen() -> bool {
     crate::telemetry::github_default_prompt_seen()
 }

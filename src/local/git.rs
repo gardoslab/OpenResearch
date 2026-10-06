@@ -1043,6 +1043,86 @@ pub fn github_repository(url: &str) -> Option<(String, String)> {
     parse_github_url(url)
 }
 
+/// A GitHub repository named by whatever a user pastes: a clone URL, a link to
+/// a file or branch inside it, or bare `owner/repo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubRepositoryRef {
+    pub owner: String,
+    pub repo: String,
+}
+
+impl GithubRepositoryRef {
+    pub fn clone_url(&self) -> String {
+        format!("https://github.com/{}/{}.git", self.owner, self.repo)
+    }
+}
+
+pub fn normalize_github_url(input: &str) -> Result<GithubRepositoryRef> {
+    let invalid = || {
+        anyhow!(
+            "Enter a GitHub repository link, such as https://github.com/owner/repo or owner/repo."
+        )
+    };
+    let trimmed = input.trim().split(['?', '#']).next().unwrap_or_default();
+    let trimmed = trimmed.trim_end_matches('/');
+    let path = if let Some(path) = trimmed.strip_prefix("git@github.com:") {
+        path.to_string()
+    } else if let Some(path) = trimmed.strip_prefix("ssh://git@github.com/") {
+        path.to_string()
+    } else {
+        let scheme_less = trimmed
+            .strip_prefix("https://")
+            .or_else(|| trimmed.strip_prefix("http://"));
+        let rest = scheme_less.unwrap_or(trimmed);
+        let rest = rest.strip_prefix("www.").unwrap_or(rest);
+        match rest.split_once('/') {
+            Some((host, path)) if host.eq_ignore_ascii_case("github.com") => path.to_string(),
+            // Bare `owner/repo`, the shorthand `gh` itself accepts. Owners never
+            // contain dots, which keeps other hosts (`gitlab.com/…`) out.
+            Some((owner, _)) if scheme_less.is_none() && !owner.contains(['.', ':', '@']) => {
+                rest.to_string()
+            }
+            _ => return Err(invalid()),
+        }
+    };
+    // Links into the repository (`/tree/main/src`, `/blob/…`, `/pulls`) name it
+    // by their first two segments.
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    let owner = segments.next().ok_or_else(invalid)?;
+    let repo = segments.next().ok_or_else(invalid)?;
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    let valid = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if !valid(owner) || !valid(repo) {
+        return Err(invalid());
+    }
+    Ok(GithubRepositoryRef {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+    })
+}
+
+/// Clone a GitHub repository with the user's `gh` credentials, so private
+/// repositories they can read work too. `path` must not exist or be empty.
+pub fn clone_github(url: &str, path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent folder", path.display()))?;
+    let destination = path.to_string_lossy();
+    authenticated_git(
+        parent,
+        &["clone", "--", url, &destination],
+        Duration::from_secs(30 * 60),
+    )
+    .map(|_| ())
+}
+
 fn github_repository_matches(url: &str, owner: &str, repo: &str) -> bool {
     parse_github_url(url).is_some_and(|(remote_owner, remote_repo)| {
         remote_owner.eq_ignore_ascii_case(owner) && remote_repo.eq_ignore_ascii_case(repo)
@@ -2283,6 +2363,51 @@ pub fn file_bytes_at_capped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_links_normalize_to_their_repository() {
+        let expected = GithubRepositoryRef {
+            owner: "gardoslab".to_string(),
+            repo: "OpenResearch".to_string(),
+        };
+        for input in [
+            "https://github.com/gardoslab/OpenResearch",
+            "https://github.com/gardoslab/OpenResearch.git",
+            "https://github.com/gardoslab/OpenResearch/",
+            "  https://www.github.com/gardoslab/OpenResearch/tree/dev/src  ",
+            "https://github.com/gardoslab/OpenResearch/blob/dev/README.md#L3",
+            "http://github.com/gardoslab/OpenResearch?tab=readme",
+            "github.com/gardoslab/OpenResearch",
+            "git@github.com:gardoslab/OpenResearch.git",
+            "ssh://git@github.com/gardoslab/OpenResearch.git",
+            "gardoslab/OpenResearch",
+        ] {
+            assert_eq!(normalize_github_url(input).unwrap(), expected, "{input}");
+        }
+        assert_eq!(
+            expected.clone_url(),
+            "https://github.com/gardoslab/OpenResearch.git"
+        );
+        assert_eq!(
+            normalize_github_url("owner/my.repo").unwrap().repo,
+            "my.repo"
+        );
+    }
+
+    #[test]
+    fn non_github_links_are_rejected() {
+        for input in [
+            "",
+            "gardoslab",
+            "https://gitlab.com/gardoslab/OpenResearch",
+            "gitlab.com/gardoslab/OpenResearch",
+            "https://github.com/gardoslab",
+            "https://github.com/../etc",
+            "owner/repo name",
+        ] {
+            assert!(normalize_github_url(input).is_err(), "{input}");
+        }
+    }
 
     #[test]
     fn github_git_uses_only_the_command_scoped_gh_credential_helper() {

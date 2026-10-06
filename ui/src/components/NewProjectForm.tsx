@@ -3,6 +3,7 @@ import { queryClient } from "../queries/client";
 import {
   githubAccountQuery,
   githubProjectRepoPreviewQuery,
+  githubRepoLookupQuery,
   repoAccessQuery,
   getProjectPathStatusQuery,
   resolvePaperQuery,
@@ -12,7 +13,7 @@ import { getProjectDefaultsQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import { ltr } from "../i18n";
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, CircleAlert, FolderOpen } from "lucide-react";
 import {
   createProject,
@@ -63,7 +64,8 @@ function displayRepository(url: string): string {
     .replace(/\/$/, "");
 }
 
-type Mode = "blank" | "folder" | "paper";
+type Mode = "blank" | "folder" | "paper" | "github";
+const MODES: Mode[] = ["blank", "folder", "paper", "github"];
 type ProjectDraft = {
   name: string;
   nameTouched: boolean;
@@ -93,41 +95,65 @@ export function NewProjectForm({
   const [paperQuery, setPaperQuery] = useState("");
   const [paper, setPaper] = useState<ResolvedPaper | null>(null);
   const [choosingPaper, setChoosingPaper] = useState(false);
+  const [repoInput, setRepoInput] = useState("");
+  const syncBeforeGithubMode = useRef<boolean | null>(null);
   const seq = useRef(0);
   const folderPickSeq = useRef(0);
   const drafts = useRef<Record<Mode, ProjectDraft>>({
     blank: { name: "", nameTouched: false, path: "", pathTouched: false },
     folder: { name: "", nameTouched: false, path: "", pathTouched: false },
     paper: { name: "", nameTouched: false, path: "", pathTouched: false },
+    github: { name: "", nameTouched: false, path: "", pathTouched: false },
   });
+  const defaultsQuery = useQuery(getProjectDefaultsQuery());
+  const projectLocation = (defaultsQuery.data?.defaultProjectLocation || "~/OpenResearch").replace(/[\\/]+$/, "");
+  const repoSearch = useDebouncedValue(repoInput.trim(), 350);
+  const lookingUpRepo = mode === "github" && Boolean(repoSearch) && repoSearch === repoInput.trim();
+  const repoLookupQuery = useQuery({ ...githubRepoLookupQuery(repoSearch), enabled: lookingUpRepo, subscribed: lookingUpRepo });
+  const repoLookup = lookingUpRepo ? repoLookupQuery.data ?? null : null;
+  const repoLookupError = lookingUpRepo ? repoLookupQuery.error?.message ?? null : null;
+  const repoLookupPending =
+    mode === "github" && Boolean(repoInput.trim()) && (repoSearch !== repoInput.trim() || repoLookupQuery.isFetching);
+  const githubSource = mode === "github" && repoLookup?.exists ? repoLookup : null;
   const paperGithubRepo = mode === "paper" ? parseGithubRepository(paper?.repoUrl) : null;
-  const automaticBlankProjectPath = name.trim() ? `~/OpenResearch/${slugify(name, 48)}` : "";
-  const automaticPaperProjectPath = `~/OpenResearch/${slugify(name || paper?.title || paper?.paperId || "")}`;
+  const automaticBlankProjectPath = name.trim() ? `${projectLocation}/${slugify(name, 48)}` : "";
+  const automaticPaperProjectPath = `${projectLocation}/${slugify(name || paper?.title || paper?.paperId || "")}`;
+  const automaticGithubProjectPath = githubSource ? `${projectLocation}/${githubSource.repo}` : "";
   const projectPath = mode === "blank" && !pathTouched
     ? automaticBlankProjectPath
     : mode === "paper" && paper && !pathTouched
       ? automaticPaperProjectPath
-      : path;
+      : mode === "github" && !pathTouched
+        ? automaticGithubProjectPath
+        : path;
   const checkedPath = useDebouncedValue(projectPath.trim(), 200);
   const pathQuery = useQuery({ ...getProjectPathStatusQuery(checkedPath), enabled: Boolean(checkedPath) && checkedPath === projectPath.trim() });
   const pathStatus = checkedPath === projectPath.trim() ? pathQuery.data ?? null : null;
   const pathError = checkedPath === projectPath.trim() ? pathQuery.error?.message ?? null : null;
   const checkingPath = Boolean(projectPath.trim()) && (checkedPath !== projectPath.trim() || pathQuery.isFetching);
   const existingGithubRepo = paperGithubRepo ?? (
-    mode === "folder" && pathStatus?.githubOwner && pathStatus.githubRepo
-      ? { owner: pathStatus.githubOwner, repo: pathStatus.githubRepo }
-      : null
+    githubSource
+      ? { owner: githubSource.owner, repo: githubSource.repo }
+      : mode === "folder" && pathStatus?.githubOwner && pathStatus.githubRepo
+        ? { owner: pathStatus.githubOwner, repo: pathStatus.githubRepo }
+        : null
   );
 
   const accountQuery = useQuery(githubAccountQuery());
   const githubLogin = accountQuery.data?.login ?? (accountQuery.isPending ? undefined : null);
-  const defaultsQuery = useQuery(getProjectDefaultsQuery());
   const appliedDefaults = useRef(false);
   useEffect(() => {
     if (appliedDefaults.current || !defaultsQuery.data) return;
     appliedDefaults.current = true;
-    setGithubSyncEnabled(defaultsQuery.data.githubForNewProjects);
+    // A cloned repository syncs back to GitHub by default; that is the point of
+    // bringing one.
+    if (syncBeforeGithubMode.current !== null) syncBeforeGithubMode.current = defaultsQuery.data.githubForNewProjects;
+    else setGithubSyncEnabled(defaultsQuery.data.githubForNewProjects);
   }, [defaultsQuery.data]);
+  const githubSourceRepo = githubSource?.repo;
+  useEffect(() => {
+    if (githubSourceRepo && !nameTouched) setName(githubSourceRepo);
+  }, [githubSourceRepo, nameTouched]);
   const previewName = useDebouncedValue(name.trim(), 150);
   const previewQuery = useQuery({ ...githubProjectRepoPreviewQuery(previewName), enabled: previewName === name.trim() });
   const githubRepoName = previewName === name.trim() ? previewQuery.data?.repo ?? slugify(name, 48) : slugify(name, 48);
@@ -196,6 +222,14 @@ export function NewProjectForm({
     const nextDraft = drafts.current[next];
     setMode(next);
     setError(null);
+    if (next === "github") {
+      syncBeforeGithubMode.current = githubSyncEnabled;
+      setGithubSyncEnabled(true);
+      setAdvancedOpen(true);
+    } else if (mode === "github" && syncBeforeGithubMode.current !== null) {
+      setGithubSyncEnabled(syncBeforeGithubMode.current);
+      syncBeforeGithubMode.current = null;
+    }
     setChoosingPaper(false);
     setPickingFolder(false);
     setName(nextDraft.name);
@@ -238,6 +272,7 @@ export function NewProjectForm({
       if (status.exists && status.directory === false) throw new Error(m.new_project_destination_is_file());
       if (mode === "blank" && status.exists) throw new Error(m.new_project_folder_exists());
       if (mode === "paper" && status.empty === false) throw new Error(m.new_project_paper_needs_empty_folder());
+      if (mode === "github" && status.empty === false) throw new Error(m.new_project_clone_needs_empty_folder());
       if (githubSyncEnabled && existingGithubRepo) {
         await queryClient.fetchQuery({ ...repoAccessQuery(existingGithubRepo.owner, existingGithubRepo.repo), staleTime: 0 }).catch(() => null);
       }
@@ -253,6 +288,7 @@ export function NewProjectForm({
         ...(mode === "paper" && paper
           ? { paperId: paper.paperId, cloneUrl: paper.repoUrl ?? undefined }
           : {}),
+        ...(mode === "github" && githubSource ? { cloneUrl: githubSource.cloneUrl } : {}),
       });
       onCreated(result.project, result.githubPublicationError);
     } catch (err) {
@@ -293,6 +329,7 @@ export function NewProjectForm({
     Boolean(projectPath.trim()) && pathStatus?.exists === true && pathStatus.directory === false;
   const nonemptyPaperCloneFolder =
     mode === "paper" && Boolean(paper?.repoUrl) && pathStatus?.empty === false;
+  const nonemptyGithubCloneFolder = mode === "github" && pathStatus?.empty === false;
   // A blank paper project is seeded and committed at the folder it initializes,
   // so it needs an empty folder of its own — a folder inside another repository
   // is fine, since it gets a repository of its own.
@@ -306,6 +343,15 @@ export function NewProjectForm({
     invalidProjectDestination ||
     nonemptyPaperCloneFolder ||
     unusableBlankPaperFolder;
+  const githubDestinationHasError =
+    (pathTouched && !projectPath.trim()) || invalidProjectDestination || nonemptyGithubCloneFolder;
+  const githubDestinationError = pathTouched && !projectPath.trim()
+    ? m.new_project_location_required()
+    : invalidProjectDestination
+      ? m.new_project_destination_is_file()
+      : nonemptyGithubCloneFolder
+        ? m.new_project_clone_needs_empty_folder()
+        : null;
   const blankDestinationHasError =
     (pathTouched && !projectPath.trim()) || invalidProjectDestination || existingBlankFolder;
   const blankDestinationError = pathTouched && !projectPath.trim()
@@ -336,9 +382,11 @@ export function NewProjectForm({
     !existingBlankFolder &&
     !invalidProjectDestination &&
     !nonemptyPaperCloneFolder &&
+    !nonemptyGithubCloneFolder &&
     !unusableBlankPaperFolder &&
     !unusableRepository &&
     (mode !== "paper" || Boolean(paper)) &&
+    (mode !== "github" || (Boolean(githubSource) && !repoLookupPending)) &&
     (!githubSyncEnabled ||
       (typeof githubLogin === "string" &&
         !githubRepoPreviewPending &&
@@ -347,6 +395,7 @@ export function NewProjectForm({
     writableGithubRepo ?? `github.com/${githubLogin ?? "you"}/${githubRepoName}`;
   const githubDecisionPending =
     githubLogin === undefined || githubRepoPreviewPending || githubAccessPending;
+  const showDetails = mode === "paper" ? Boolean(paper) : mode === "github" ? Boolean(githubSource) : true;
   const hasNoPaperResults =
     mode === "paper" &&
     !paper &&
@@ -359,32 +408,30 @@ export function NewProjectForm({
   return (
     <form className="form [&_.form-seg]:self-start [&_.form-seg]:mb-0.5 [&_.form-seg_button]:py-[5px] [&_.form-seg_button]:px-3 [&_.repo-hint]:font-normal [&_.repo-hint]:text-sm [&_.repo-hint]:text-muted [&_.repo-hint.ok]:text-accent-teal [&_.folder-picker-control]:flex [&_.folder-picker-control]:items-center [&_.folder-picker-control]:gap-[9px] [&_.folder-picker-control]:w-full [&_.folder-picker-control]:min-w-0 [&_.folder-picker-control]:py-2 [&_.folder-picker-control]:px-2.5 [&_.folder-picker-control]:overflow-hidden [&_.folder-picker-control]:bg-background [&_.folder-picker-control]:border [&_.folder-picker-control]:border-border [&_.folder-picker-control]:rounded-md [&_.folder-picker-control]:cursor-pointer [&_.folder-picker-control]:text-start [&_.folder-picker-control]:transition-[border-color,box-shadow] [&_.folder-picker-control]:duration-120 [&_.folder-picker-control]:ease-standard [&_.folder-picker-control:hover:not(:disabled)]:border-muted [&_.folder-picker-control:hover:not(:disabled)]:shadow-control-subtle [&_.folder-picker-control:focus-visible]:outline-2 [&_.folder-picker-control:focus-visible]:outline-solid [&_.folder-picker-control:focus-visible]:outline-text [&_.folder-picker-control:focus-visible]:outline-offset-2 [&_.folder-picker-control_span]:flex-1 [&_.folder-picker-control_span]:min-w-0 [&_.folder-picker-control_span]:overflow-hidden [&_.folder-picker-control_span]:text-ellipsis [&_.folder-picker-control_span]:whitespace-nowrap [&_.folder-picker-control_.placeholder]:text-muted [&_.folder-picker-icon]:flex-none [&_.folder-picker-icon]:text-current [&_.folder-picker-chevron]:flex-none [&_.folder-picker-chevron]:text-muted [&_.folder-picker-control:hover:not(:disabled)_.folder-picker-chevron]:text-subtext [&_.folder-picker-hint]:text-subtext [&_.folder-picker-hint]:text-sm [&_.folder-picker-hint]:font-normal [&_.folder-picker-hint]:leading-[1.4] [&_.project-location-field]:flex [&_.project-location-field]:flex-col [&_.project-location-field]:gap-2 [&_.project-location-label]:text-text [&_.project-location-label]:text-base [&_.project-location-label]:font-medium [&_.project-field-label]:text-text [&_.project-field-label]:text-base [&_.project-field-label]:font-medium [&_.folder-picker-control:disabled]:cursor-default [&_.folder-picker-control:disabled]:opacity-65 [&_.paper-destination]:flex [&_.paper-destination]:items-center [&_.paper-destination]:gap-2.5 [&_.paper-destination]:pt-2 [&_.paper-destination]:pe-2 [&_.paper-destination]:pb-2 [&_.paper-destination]:ps-3 [&_.paper-destination]:border [&_.paper-destination]:border-border [&_.paper-destination]:rounded-md [&_.paper-destination]:bg-background [&_.paper-destination_code]:flex-1 [&_.paper-destination_code]:min-w-0 [&_.paper-destination_code]:overflow-hidden [&_.paper-destination_code]:text-text [&_.paper-destination_code]:text-sm [&_.paper-destination_code]:font-normal [&_.paper-destination_code]:text-ellipsis [&_.paper-destination_code]:whitespace-nowrap [&_.paper-destination_.btn]:flex-none [&_.project-path-notice]:py-[9px] [&_.project-path-notice]:px-[11px] [&_.project-path-notice]:border [&_.project-path-notice]:border-border-variant [&_.project-path-notice]:rounded-sm [&_.project-path-notice]:bg-surface [&_.project-path-notice]:text-subtext [&_.project-path-notice]:text-sm [&_.project-path-notice]:leading-[1.4] [&_.project-path-notice.error]:border-danger-notice-border [&_.paper-results]:flex [&_.paper-results]:flex-col [&_.paper-results]:border [&_.paper-results]:border-border [&_.paper-results]:rounded-md [&_.paper-results]:max-h-60 [&_.paper-results]:overflow-y-auto [&_.paper-results_button]:flex [&_.paper-results_button]:flex-col [&_.paper-results_button]:items-start [&_.paper-results_button]:gap-0.5 [&_.paper-results_button]:py-2 [&_.paper-results_button]:px-2.5 [&_.paper-results_button]:bg-none [&_.paper-results_button]:bg-transparent [&_.paper-results_button]:border-0 [&_.paper-results_button]:border-b [&_.paper-results_button]:border-b-border-variant [&_.paper-results_button]:text-start [&_.paper-results_button]:[font:inherit] [&_.paper-results_button]:text-text [&_.paper-results_button]:cursor-pointer [&_.paper-results_button:last-child]:border-b-0 [&_.paper-results_button:hover]:bg-surface [&_.paper-results_.title]:text-sm [&_.paper-results_.title]:font-medium [&_.paper-results_.id]:text-xs [&_.paper-results_.id]:text-muted [&_.paper-pick_.id]:text-xs [&_.paper-pick_.id]:text-muted [&_.paper-pick]:flex [&_.paper-pick]:items-center [&_.paper-pick]:justify-between [&_.paper-pick]:gap-2.5 [&_.paper-pick]:py-2.5 [&_.paper-pick]:px-3 [&_.paper-pick]:border [&_.paper-pick]:border-border [&_.paper-pick]:rounded-md [&_.paper-pick]:bg-surface [&_.paper-pick_.meta]:min-w-0 [&_.paper-pick_.title]:text-sm [&_.paper-pick_.title]:font-medium flex flex-col [&_label]:flex [&_label]:flex-col [&_label]:gap-1 [&_label]:text-sm [&_label]:text-text [&_label]:font-medium [&_.row2]:grid [&_.row2]:grid-cols-2 [&_.row2]:gap-2.5 [&_.actions]:flex [&_.actions]:justify-end [&_.actions]:gap-2.5 [&_.actions]:mt-1.5 [&_.new-project-actions]:justify-start [&_.new-project-actions]:mt-2.5 [&_.error]:text-accent-red [&_.error]:text-sm [&_.error]:whitespace-pre-wrap new-project-form gap-4.5 [&_>_label]:gap-2" onSubmit={submit}>
       <div className="seg inline-flex items-center gap-0.5 p-[3px] rounded-md bg-hover-subtle [&_button]:py-[3px] [&_button]:px-3 [&_button]:text-sm [&_button]:font-medium [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-segment [&_button:disabled]:text-muted [&_button:disabled]:cursor-default form-seg">
-        <button
-          type="button"
-          className={mode === "blank" ? "active" : ""}
-          aria-pressed={mode === "blank"}
-          onClick={() => chooseMode("blank")}
-        >
-          {m.new_project_form_blank_project()}
-        </button>
-        <span aria-hidden className={`h-6 w-px bg-border${mode === "paper" ? "" : " invisible"}`} />
-        <button
-          type="button"
-          className={mode === "folder" ? "active" : ""}
-          aria-pressed={mode === "folder"}
-          onClick={() => chooseMode("folder")}
-        >
-          {m.new_project_form_existing_folder()}
-        </button>
-        <span aria-hidden className={`h-6 w-px bg-border${mode === "blank" ? "" : " invisible"}`} />
-        <button
-          type="button"
-          className={mode === "paper" ? "active" : ""}
-          aria-pressed={mode === "paper"}
-          onClick={() => chooseMode("paper")}
-        >
-          {m.new_project_form_from_a_paper()}
-        </button>
+        {MODES.map((option, index) => (
+          <Fragment key={option}>
+            {index > 0 && (
+              <span
+                aria-hidden
+                className={`h-6 w-px bg-border${mode === option || mode === MODES[index - 1] ? " invisible" : ""}`}
+              />
+            )}
+            <button
+              type="button"
+              className={mode === option ? "active" : ""}
+              aria-pressed={mode === option}
+              onClick={() => chooseMode(option)}
+            >
+              {option === "blank"
+                ? m.new_project_form_blank_project()
+                : option === "folder"
+                  ? m.new_project_form_existing_folder()
+                  : option === "paper"
+                    ? m.new_project_form_from_a_paper()
+                    : m.new_project_form_from_github()}
+            </button>
+          </Fragment>
+        ))}
       </div>
 
       {mode === "paper" && !paper && (
@@ -419,6 +466,47 @@ export function NewProjectForm({
         </label>
       )}
 
+      {mode === "github" && (
+        <label className="!font-normal">
+          <span className="project-field-label !font-medium">{m.new_project_github_repository()}</span>
+          <input
+            className="text-sm font-normal"
+            data-initial-focus
+            value={repoInput}
+            onChange={(event) => {
+              setError(null);
+              setRepoInput(event.target.value);
+            }}
+            placeholder={m.new_project_github_url_placeholder()}
+            spellCheck={false}
+            autoComplete="off"
+            dir="ltr"
+          />
+          {!repoInput.trim() ? (
+            <span className="repo-hint">{m.new_project_github_hint()}</span>
+          ) : repoLookupPending ? (
+            <span className="repo-hint">{m.new_project_github_looking_up()}</span>
+          ) : repoLookupError ? (
+            <span className="repo-hint !text-accent-red" role="alert">{repoLookupError}</span>
+          ) : repoLookup && !repoLookup.exists ? (
+            <span className="repo-hint !text-accent-red" role="alert">
+              {repoLookup.githubAuthenticated
+                ? m.new_project_github_not_found({ repository: ltr(`${repoLookup.owner}/${repoLookup.repo}`) })
+                : m.new_project_github_not_found_connect({
+                    repository: ltr(`${repoLookup.owner}/${repoLookup.repo}`),
+                    command: ltr("gh auth login"),
+                  })}
+            </span>
+          ) : githubSource ? (
+            <span className="repo-hint ok">
+              {githubSource.private
+                ? m.new_project_github_found_private({ repository: ltr(`github.com/${githubSource.owner}/${githubSource.repo}`) })
+                : m.new_project_github_found_public({ repository: ltr(`github.com/${githubSource.owner}/${githubSource.repo}`) })}
+            </span>
+          ) : null}
+        </label>
+      )}
+
       {paper && mode === "paper" && (
         <div className="paper-pick !flex-col !items-stretch">
           <div className="flex items-start justify-between gap-2.5">
@@ -441,7 +529,7 @@ export function NewProjectForm({
         </div>
       )}
 
-      {(mode !== "paper" || paper) && (
+      {showDetails && (
         <>
           {mode === "blank" && (
             <label className="!font-normal">
@@ -458,7 +546,31 @@ export function NewProjectForm({
               />
             </label>
           )}
-          {mode === "paper" ? (
+          {mode === "github" ? (
+            <label className="project-location-field">
+              <span className="project-location-label !font-medium">{m.new_project_clone_destination()}</span>
+              <input
+                className="text-sm font-normal"
+                value={projectPath}
+                onChange={(event) => {
+                  setPathTouched(true);
+                  setPath(event.target.value);
+                }}
+                aria-describedby={githubDestinationHasError ? "github-destination-description" : undefined}
+                placeholder={`${projectLocation}/repository`}
+                spellCheck={false}
+                dir="ltr"
+              />
+              {checkingPath && (
+                <span className="sr-only" role="status" aria-live="polite">{m.new_project_form_checking_project_location()}</span>
+              )}
+              {githubDestinationHasError && (
+                <span id="github-destination-description" className="folder-picker-hint error !text-accent-red" role="alert">
+                  {githubDestinationError}
+                </span>
+              )}
+            </label>
+          ) : mode === "paper" ? (
             <label className="project-location-field">
               <span className="project-location-label !font-medium">
                 {paper?.repoUrl ? m.new_project_clone_destination() : m.new_project_form_project_location()}
@@ -471,7 +583,7 @@ export function NewProjectForm({
                   setPath(event.target.value);
                 }}
                 aria-describedby={paperDestinationHasError ? "paper-destination-description" : undefined}
-                placeholder="~/OpenResearch/paper-title"
+                placeholder={`${projectLocation}/paper-title`}
                 spellCheck={false}
               />
               {checkingPath && (
@@ -525,7 +637,7 @@ export function NewProjectForm({
                   setPathTouched(true);
                   setPath(event.target.value);
                 }}
-                placeholder="~/OpenResearch/my-research"
+                placeholder={`${projectLocation}/my-research`}
                 aria-describedby={blankDestinationHasError ? "blank-destination-description" : undefined}
                 spellCheck={false}
               />
@@ -575,7 +687,7 @@ export function NewProjectForm({
       )}
 
       {error && <div className="error" role="alert">{error}</div>}
-      {(mode !== "paper" || paper) && projectPath && (mode !== "blank" || name.trim()) && (
+      {showDetails && projectPath && (mode !== "blank" || name.trim()) && (
         <div className="flex w-full flex-col items-start gap-2">
           <button
             type="button"
@@ -624,14 +736,18 @@ export function NewProjectForm({
         {onCancel && <Button type="button" onClick={onCancel}>{m.new_project_form_cancel()}</Button>}
         <Button variant="primary" className="ms-auto" disabled={!canCreate}>
           {pending
-            ? m.new_project_creating()
+            ? mode === "github" || (mode === "paper" && paper?.repoUrl)
+              ? m.new_project_cloning()
+              : m.new_project_creating()
             : mode === "paper"
               ? paper?.repoUrl
                 ? m.new_project_clone_paper()
                 : m.new_project_create()
               : mode === "folder"
                 ? m.new_project_use_folder()
-                : m.new_project_create()}
+                : mode === "github"
+                  ? m.new_project_clone_repository()
+                  : m.new_project_create()}
         </Button>
       </div>
     </form>

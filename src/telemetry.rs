@@ -153,6 +153,10 @@ pub(crate) struct Settings {
     /// local project is registered. Existing projects are never changed.
     #[serde(default)]
     pub github_for_new_projects: Option<bool>,
+    /// Folder new projects are created in by default (`~` allowed). Absent =
+    /// `~/OpenResearch`; set it off `$HOME` where home quotas are small.
+    #[serde(default)]
+    pub default_project_location: Option<String>,
     /// Whether the one-time post-publication default prompt has been answered.
     #[serde(default)]
     pub github_default_prompt_seen: Option<bool>,
@@ -362,6 +366,14 @@ pub(crate) fn github_for_new_projects() -> bool {
 
 pub(crate) fn set_github_for_new_projects(enabled: bool) -> std::io::Result<()> {
     mutate_settings(|settings| settings.github_for_new_projects = Some(enabled))
+}
+
+pub(crate) fn default_project_location() -> Option<String> {
+    load_settings().and_then(|settings| settings.default_project_location)
+}
+
+pub(crate) fn set_default_project_location(location: Option<String>) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.default_project_location = location)
 }
 
 /// Whether orx may apply updates on its own. Defaults to enabled — the whole
@@ -1035,6 +1047,7 @@ pub(crate) enum ProjectCreationMode {
     Blank,
     Folder,
     Paper,
+    Github,
 }
 
 pub(crate) fn capture_project_created(local: bool, mode: Option<ProjectCreationMode>) {
@@ -1652,6 +1665,18 @@ mod tests {
 
         set_github_for_new_projects(false).unwrap();
         assert!(!github_for_new_projects());
+
+        set_default_project_location(Some("/projectnb/lab".into())).unwrap();
+        assert_eq!(
+            default_project_location().as_deref(),
+            Some("/projectnb/lab")
+        );
+        assert_eq!(
+            load_settings().unwrap().default_backend.as_deref(),
+            Some("modal")
+        );
+        set_default_project_location(None).unwrap();
+        assert_eq!(default_project_location(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2230,7 +2255,7 @@ mod tests {
 
     #[test]
     fn project_creation_modes_are_allowlisted() {
-        for mode in ["blank", "folder", "paper"] {
+        for mode in ["blank", "folder", "paper", "github"] {
             let parsed: ProjectCreationMode = serde_json::from_value(json!(mode)).unwrap();
             assert_eq!(json!(parsed), json!(mode));
         }

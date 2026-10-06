@@ -294,7 +294,7 @@ export interface NewProject {
   runCommand?: string;
   paperId?: string;
   cloneUrl?: string;
-  creationMode?: "blank" | "folder" | "paper";
+  creationMode?: "blank" | "folder" | "paper" | "github";
   createFolder?: boolean;
   requireNewFolder?: boolean;
   initializeGit?: boolean;
@@ -332,6 +332,22 @@ export const searchPapers = (q: string, signal?: AbortSignal) =>
 /** The signed-in GitHub login, for naming the account a new repo lands on.
  * `login` is null when there's no usable token. */
 export const githubAccount = (signal?: AbortSignal) => get<{ login: string | null }>("/api/github/account", signal);
+
+export interface GithubRepoLookup {
+  owner: string;
+  repo: string;
+  cloneUrl: string;
+  /** Visible to this machine: public, or private and readable with `gh`. */
+  exists: boolean;
+  private: boolean;
+  canPush: boolean;
+  defaultBranch: string | null;
+  githubAuthenticated: boolean;
+}
+
+/** Resolve a pasted GitHub link (any URL into the repo, or `owner/repo`). */
+export const githubRepoLookup = (url: string, signal?: AbortSignal) =>
+  get<GithubRepoLookup>(`/api/github/repo-lookup?url=${encodeURIComponent(url)}`, signal);
 
 export const githubProjectRepoPreview = (name: string, signal?: AbortSignal) =>
   get<{ repo: string }>(`/api/github/project-repo-preview?name=${encodeURIComponent(name)}`, signal);
@@ -1509,6 +1525,8 @@ export const setLitSources = (body: LitSourcesSettings) =>
 export interface ProjectDefaultsSettings {
   githubForNewProjects: boolean;
   githubDefaultPromptSeen: boolean;
+  /** Parent folder new projects default into, e.g. `~/OpenResearch`. */
+  defaultProjectLocation: string;
   ghInstalled: boolean;
   githubAuthenticated: boolean;
 }
@@ -1524,6 +1542,10 @@ export const setProjectDefaults = (
     githubForNewProjects,
     ...(githubDefaultPromptSeen === undefined ? {} : { githubDefaultPromptSeen }),
   });
+
+/** An empty location resets to the built-in default. */
+export const setDefaultProjectLocation = (defaultProjectLocation: string) =>
+  post<ProjectDefaultsSettings>("/api/settings/projects", { defaultProjectLocation });
 
 export interface ProjectGitStatus {
   path: string;

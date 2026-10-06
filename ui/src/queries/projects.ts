@@ -51,6 +51,13 @@ export const githubProjectRepoPreviewQuery = (name: string) => queryOptions({
   staleTime: 30_000,
 });
 
+export const githubRepoLookupQuery = (url: string) => queryOptions({
+  queryKey: workspaceKey("githubRepoLookup", url),
+  queryFn: ({ signal }) => api.githubRepoLookup(url, signal),
+  staleTime: 30_000,
+  retry: false,
+});
+
 export const repoAccessQuery = (owner: string, repo: string) => queryOptions({
   queryKey: workspaceKey("repoAccess", owner, repo),
   queryFn: ({ signal }) => api.repoAccess(owner, repo, signal),
