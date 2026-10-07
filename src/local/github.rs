@@ -161,6 +161,10 @@ pub async fn public_repo_size_kb(url: &str) -> Option<u64> {
 pub struct RepoMeta {
     pub can_push: bool,
     pub archived: bool,
+    pub private: bool,
+    /// `owner/repo` as GitHub spells it, which may differ in case from a link.
+    pub full_name: Option<String>,
+    pub default_branch: Option<String>,
 }
 
 pub async fn viewer_login() -> Result<String> {
@@ -201,7 +205,47 @@ fn parse_repo_meta(body: &str) -> Result<RepoMeta> {
             .get("archived")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        private: body
+            .get("private")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        full_name: body
+            .get("full_name")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        default_branch: body
+            .get("default_branch")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
+}
+
+/// Repository metadata without `gh`, for users who have not connected GitHub.
+/// Only public repositories are visible this way; anything else reads as missing.
+pub async fn public_repo_meta(owner: &str, repo: &str) -> Result<Option<RepoMeta>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let response = client
+        .get(format!(
+            "https://api.github.com/{}",
+            repository_endpoint(owner, repo)
+        ))
+        .header("user-agent", UA)
+        .header("accept", "application/vnd.github+json")
+        .header("x-github-api-version", "2022-11-28")
+        .send()
+        .await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        return Err(anyhow!(
+            "GitHub returned {} for {owner}/{repo}",
+            response.status()
+        ));
+    }
+    parse_repo_meta(&response.text().await?).map(Some)
 }
 
 fn github_api_not_found(error: &str) -> bool {
@@ -238,13 +282,18 @@ mod tests {
     #[test]
     fn repository_metadata_defaults_to_no_access() {
         let meta =
-            parse_repo_meta(r#"{"permissions":{"push":true},"archived":false}"#).expect("metadata");
+            parse_repo_meta(r#"{"permissions":{"push":true},"archived":false,"private":true,"full_name":"Owner/Repo","default_branch":"dev"}"#).expect("metadata");
         assert!(meta.can_push);
         assert!(!meta.archived);
+        assert!(meta.private);
+        assert_eq!(meta.full_name.as_deref(), Some("Owner/Repo"));
+        assert_eq!(meta.default_branch.as_deref(), Some("dev"));
 
         let meta = parse_repo_meta("{}").expect("metadata");
         assert!(!meta.can_push);
         assert!(!meta.archived);
+        assert!(!meta.private);
+        assert!(meta.full_name.is_none());
     }
 
     #[test]

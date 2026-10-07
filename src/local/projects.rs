@@ -61,30 +61,42 @@ pub(crate) fn expand_path(path: &str) -> Result<PathBuf> {
 
 const PAPER_PDF_NAME: &str = "paper.pdf";
 
+struct CloneSpec<'a> {
+    url: &'a str,
+    shallow: bool,
+    authenticated: bool,
+    keep_origin: bool,
+}
+
 fn prepare_path(
     path: &str,
     create_folder: bool,
     require_new_folder: bool,
     initialize_git: bool,
-    clone_url: Option<&str>,
-    shallow_clone: bool,
+    clone: Option<CloneSpec<'_>>,
     paper_pdf: Option<&[u8]>,
 ) -> Result<PathBuf> {
     let path = expand_path(path)?;
-    if let Some(url) = clone_url.map(str::trim).filter(|url| !url.is_empty()) {
+    if let Some(clone) = clone {
         if path.exists() {
             let mut entries = std::fs::read_dir(&path)?;
             if entries.next().is_some() {
                 return Err(crate::error::anyhow!(
-                    "{} must be empty before cloning the paper repository",
+                    "{} must be empty before cloning the repository",
                     path.display()
                 ));
             }
         } else if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        git::clone_public(url, &path, shallow_clone)?;
-        git::rename_origin_to_upstream(&path)?;
+        if clone.authenticated {
+            git::clone_github(clone.url, &path)?;
+        } else {
+            git::clone_public(clone.url, &path, clone.shallow)?;
+        }
+        if !clone.keep_origin {
+            git::rename_origin_to_upstream(&path)?;
+        }
     } else if require_new_folder && path.exists() {
         return Err(crate::error::anyhow!(
             "{} already exists; choose a new folder for a blank project",
@@ -169,18 +181,29 @@ pub fn create_project(
         initialize_git,
         clone_url,
         shallow_clone,
+        authenticated_clone,
+        keep_origin,
         run_command,
         paper_id,
         paper_pdf,
     } = options;
+    let clone = clone_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(|url| CloneSpec {
+            url,
+            shallow: shallow_clone,
+            authenticated: authenticated_clone,
+            keep_origin,
+        });
     let slug = unique_project_slug(store, &slugify(name))?;
     let repo_path = prepare_path(
         path,
         create_folder,
         require_new_folder,
         initialize_git,
-        clone_url.as_deref(),
-        shallow_clone,
+        clone,
         paper_pdf.as_deref(),
     )?;
     if store
@@ -223,6 +246,11 @@ pub struct CreateProjectOptions {
     pub initialize_git: bool,
     pub clone_url: Option<String>,
     pub shallow_clone: bool,
+    /// Clone with the user's `gh` credentials, so private repositories work.
+    pub authenticated_clone: bool,
+    /// Leave the clone's `origin` alone. A paper's repository belongs to its
+    /// authors and becomes `upstream`; a repository the user brought is theirs.
+    pub keep_origin: bool,
     pub run_command: Option<String>,
     pub paper_id: Option<String>,
     pub paper_pdf: Option<Vec<u8>>,
@@ -1050,6 +1078,31 @@ mod tests {
         assert_eq!(remotes[0].0, "upstream");
         assert!(!remotes.iter().any(|(name, _)| name == "origin"));
         assert!(project.github_owner.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn github_clone_keeps_origin() {
+        let root = root();
+        let source = root.join("source");
+        initialized(&source);
+        let store = Store::open_at(root.join("data")).unwrap();
+        let destination = root.join("nested").join("clone");
+        let project = create_project(
+            &store,
+            "Clone",
+            destination.to_str().unwrap(),
+            CreateProjectOptions {
+                create_folder: true,
+                clone_url: Some(source.to_string_lossy().into_owned()),
+                keep_origin: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let remotes = git::remotes(Path::new(&project.repo_path)).unwrap();
+        assert!(remotes.iter().any(|(name, _)| name == "origin"));
+        assert!(!remotes.iter().any(|(name, _)| name == "upstream"));
         let _ = std::fs::remove_dir_all(root);
     }
 

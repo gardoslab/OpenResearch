@@ -508,6 +508,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(github_project_repo_preview),
         )
         .route("/api/github/repo-access", get(github_repo_access))
+        .route("/api/github/repo-lookup", get(github_repo_lookup))
         .route("/api/projects/{id}/experiments", get(list_experiments))
         .route("/api/projects/{id}/runs", get(list_project_runs))
         .route("/api/papers/search", get(search_papers_api))
@@ -1465,7 +1466,22 @@ async fn create_project(
     let create_folder = req.create_folder;
     let require_new_folder = req.require_new_folder;
     let initialize_git = req.initialize_git;
-    let clone_url = req.clone_url.filter(|url| !url.trim().is_empty());
+    let from_github = matches!(
+        req.creation_mode,
+        Some(crate::telemetry::ProjectCreationMode::Github)
+    );
+    let mut clone_url = req.clone_url.filter(|url| !url.trim().is_empty());
+    // A repository the user brings is cloned whole, with their own GitHub
+    // credentials when they have connected GitHub, so private ones work too.
+    let mut authenticated_clone = false;
+    if from_github {
+        let url = clone_url
+            .as_deref()
+            .ok_or_else(|| bad_request("a GitHub repository link is required"))?;
+        let repository = local::git::normalize_github_url(url).map_err(bad_request)?;
+        clone_url = Some(repository.clone_url());
+        authenticated_clone = local::github::status().await.authenticated;
+    }
     let paper_id = req
         .paper_id
         .map(|paper_id| paper_id.trim().to_string())
@@ -1482,10 +1498,10 @@ async fn create_project(
     };
     let github_sync_enabled = req
         .github_sync_enabled
-        .unwrap_or_else(crate::config::github_for_new_projects);
+        .unwrap_or_else(|| from_github || crate::config::github_for_new_projects());
     let repo_size_kb = match clone_url.as_deref() {
-        Some(url) => local::github::public_repo_size_kb(url).await,
-        None => None,
+        Some(url) if !from_github => local::github::public_repo_size_kb(url).await,
+        _ => None,
     };
     let shallow_clone = local::github::should_shallow_clone(repo_size_kb);
     let run_command = req.run_command;
@@ -1502,6 +1518,8 @@ async fn create_project(
                 initialize_git,
                 clone_url,
                 shallow_clone,
+                authenticated_clone,
+                keep_origin: from_github,
                 run_command,
                 paper_id,
                 paper_pdf,
@@ -1862,6 +1880,41 @@ async fn github_repo_access(Query(q): Query<RepoAccessQuery>) -> ApiResult {
         .map_err(bad_request)?;
     Ok(Json(json!({
         "canPush": meta.is_some_and(|meta| meta.can_push && !meta.archived),
+    })))
+}
+
+#[derive(Deserialize)]
+struct RepoLookupQuery {
+    url: String,
+}
+
+/// Resolve a pasted GitHub link for the new-project form: which repository it
+/// names, whether this machine can read it, and whether sync can push to it.
+async fn github_repo_lookup(Query(q): Query<RepoLookupQuery>) -> ApiResult {
+    let repository = local::git::normalize_github_url(&q.url).map_err(bad_request)?;
+    let github_status = local::github::status().await;
+    let meta = if github_status.authenticated {
+        local::github::repo_meta(&repository.owner, &repository.repo).await
+    } else {
+        local::github::public_repo_meta(&repository.owner, &repository.repo).await
+    }
+    .map_err(bad_request)?;
+    let (owner, repo) = meta
+        .as_ref()
+        .and_then(|meta| meta.full_name.as_deref())
+        .and_then(|full_name| full_name.split_once('/'))
+        .map(|(owner, repo)| (owner.to_string(), repo.to_string()))
+        .unwrap_or((repository.owner.clone(), repository.repo.clone()));
+    let clone_url = format!("https://github.com/{owner}/{repo}.git");
+    Ok(Json(json!({
+        "owner": owner,
+        "repo": repo,
+        "cloneUrl": clone_url,
+        "exists": meta.is_some(),
+        "private": meta.as_ref().is_some_and(|meta| meta.private),
+        "canPush": meta.as_ref().is_some_and(|meta| meta.can_push && !meta.archived),
+        "defaultBranch": meta.and_then(|meta| meta.default_branch),
+        "githubAuthenticated": github_status.authenticated,
     })))
 }
 
@@ -5157,6 +5210,7 @@ fn project_defaults_json(github_status: local::github::Status) -> Value {
     json!({
         "githubForNewProjects": crate::config::github_for_new_projects(),
         "githubDefaultPromptSeen": crate::config::github_default_prompt_seen(),
+        "defaultProjectLocation": crate::config::default_project_location(),
         "ghInstalled": github_status.installed,
         "githubAuthenticated": github_status.authenticated,
     })
@@ -5169,19 +5223,46 @@ async fn project_defaults() -> ApiResult {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SetProjectDefaultsReq {
-    github_for_new_projects: bool,
+    #[serde(default)]
+    github_for_new_projects: Option<bool>,
     #[serde(default)]
     github_default_prompt_seen: Option<bool>,
+    /// Empty resets to the built-in default.
+    #[serde(default)]
+    default_project_location: Option<String>,
 }
 
 async fn set_project_defaults(Json(req): Json<SetProjectDefaultsReq>) -> ApiResult {
     let github_status = local::github::status().await;
-    if req.github_for_new_projects && !github_status.authenticated {
+    if req.github_for_new_projects == Some(true) && !github_status.authenticated {
         return Err(bad_request(
             "Connect GitHub before enabling it by default for new projects.",
         ));
     }
-    crate::config::set_github_for_new_projects(req.github_for_new_projects)?;
+    if let Some(location) = req.default_project_location {
+        let location = location.trim().trim_end_matches(['/', '\\']).to_string();
+        if location.is_empty() {
+            crate::config::set_default_project_location(None)?;
+        } else {
+            // A relative folder would resolve against wherever `orx up` started.
+            if !(location.starts_with('~') || std::path::Path::new(&location).is_absolute()) {
+                return Err(bad_request(
+                    "Use an absolute folder, such as ~/OpenResearch or /projectnb/<lab>/<user>.",
+                ));
+            }
+            let resolved = local::projects::expand_path(&location).map_err(bad_request)?;
+            if resolved.exists() && !resolved.is_dir() {
+                return Err(bad_request(format!(
+                    "{} is not a folder",
+                    resolved.display()
+                )));
+            }
+            crate::config::set_default_project_location(Some(location))?;
+        }
+    }
+    if let Some(enabled) = req.github_for_new_projects {
+        crate::config::set_github_for_new_projects(enabled)?;
+    }
     if let Some(seen) = req.github_default_prompt_seen {
         crate::config::set_github_default_prompt_seen(seen)?;
     }
