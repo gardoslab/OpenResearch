@@ -920,6 +920,32 @@ pub async fn stream_logs(
     Ok(seen)
 }
 
+/// How long the remote run's `log` has gone unwritten, by the remote's own
+/// clock (`date` against the file's mtime, so a skewed clock here cannot
+/// matter). The supervisor's local mirror only moves when a complete line
+/// arrives, which a progress bar redrawing one `\r`-terminated line never
+/// produces; this asks the file itself. `None` when it cannot be told — the
+/// file is not there yet, the host is unreachable, or the answer is garbled.
+pub async fn log_age(target: &SshTarget, dir: &str) -> Option<Duration> {
+    let log = format!("{}/log", remote_path(dir));
+    // GNU `stat -c`, then BSD `stat -f`.
+    let cmd = format!(
+        "m=$(stat -c %Y {log} 2>/dev/null || stat -f %m {log} 2>/dev/null) \
+         && echo $(( $(date +%s) - m ))"
+    );
+    let out = tokio::time::timeout(Duration::from_secs(20), ssh_run(target, &cmd, None))
+        .await
+        .ok()?
+        .ok()?;
+    parse_log_age(&out)
+}
+
+/// A negative age (the file is stamped in the remote's future) counts as fresh.
+fn parse_log_age(out: &str) -> Option<Duration> {
+    let secs: i64 = out.trim().parse().ok()?;
+    Some(Duration::from_secs(secs.max(0) as u64))
+}
+
 /// Cancel = TERM the process group if we have one (setsid case), else the pid
 /// (nohup fallback). The negative-pid form targets the whole group.
 pub async fn cancel_job(
@@ -1090,6 +1116,14 @@ mod tests {
         let plain = SshTarget::alias("scc1");
         let guarded = SshTarget::alias("scc1").with_second_factor(SecondFactor::Required);
         assert_eq!(ssh_opts(&plain, true), ssh_opts(&guarded, true));
+    }
+
+    #[test]
+    fn log_age_reads_the_remote_answer_and_ignores_anything_else() {
+        assert_eq!(parse_log_age("5421\n"), Some(Duration::from_secs(5421)));
+        assert_eq!(parse_log_age("-3\n"), Some(Duration::ZERO));
+        assert_eq!(parse_log_age(""), None, "no file, so no answer");
+        assert_eq!(parse_log_age("stat: cannot stat"), None);
     }
 
     /// Relative dirs keep the historical `$HOME` anchor byte-for-byte; an

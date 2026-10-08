@@ -114,17 +114,29 @@ fn slack_block_text(text: &str) -> String {
     }
 }
 
+/// Slack refuses a whole message whose `header` block is longer than this,
+/// and a long experiment title is enough to get there.
+const SLACK_HEADER_LIMIT: usize = 150;
+
 fn payload(header: &str, details: &str) -> Value {
+    // Too long for a header block: show its start there and the whole line at
+    // the top of the body, so nothing is lost and the message is still sent.
+    let (block_header, body) = if header.chars().count() <= SLACK_HEADER_LIMIT {
+        (header.to_string(), details.to_string())
+    } else {
+        let shown: String = header.chars().take(SLACK_HEADER_LIMIT - 1).collect();
+        (format!("{shown}\u{2026}"), format!("{header}\n\n{details}"))
+    };
     json!({
         "text": format!("{header}\n\n{details}"),
         "blocks": [
             {
                 "type": "header",
-                "text": { "type": "plain_text", "text": header, "emoji": true },
+                "text": { "type": "plain_text", "text": block_header, "emoji": true },
             },
             {
                 "type": "section",
-                "text": { "type": "mrkdwn", "text": slack_block_text(details) },
+                "text": { "type": "mrkdwn", "text": slack_block_text(&body) },
             },
         ],
     })
@@ -144,6 +156,49 @@ pub fn project_event_enabled(store: &Store, project_id: &str, event: SlackEvent)
 /// The channel this project's messages go to when it overrides the global one.
 fn project_channel(store: &Store, project_id: &str) -> Result<Option<String>> {
     Ok(store.project_slack(project_id)?.channel_id)
+}
+
+/// What the drain loop should do with a queued message, by its project's
+/// Slack settings at send time.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Routing {
+    /// The project has muted this event since (or before) it was queued.
+    Skip,
+    /// Send it, to `channel` instead of the payload's own when given.
+    Send { channel: Option<String> },
+}
+
+/// Apply a run message's project settings when it is *sent*, not only when
+/// it is queued. A detached `orx supervise` outlives the `orx up` that
+/// started it, so after an update it keeps queueing with the code it started
+/// with — which, for a message about a project's runs, predates that
+/// project's overrides. The drain runs in the current `orx up`, so it has
+/// the last word. Messages that name no run (digests, thread replies) were
+/// routed by the process that queued them and are left alone.
+pub fn route_at_send(
+    store: &Store,
+    kind: &str,
+    run_id: Option<&str>,
+    payload: &Value,
+) -> Result<Routing> {
+    let event: Option<SlackEvent> = match kind {
+        "job_submitted" => Some(|events| events.job_submitted),
+        "run_synthesized" => Some(|events| events.run_synthesized),
+        "run_stalled" => Some(|events| events.run_stalled),
+        _ => None,
+    };
+    let Some(run) = run_id.map(|id| store.get_run(id)).transpose()?.flatten() else {
+        return Ok(Routing::Send { channel: None });
+    };
+    let project = store.project_slack(&run.project_id)?;
+    if event.is_some_and(|event| !event(&project.events)) {
+        return Ok(Routing::Skip);
+    }
+    let channel = match payload.get("channel") {
+        Some(_) => None,
+        None => project.channel_id,
+    };
+    Ok(Routing::Send { channel })
 }
 
 /// The finished payload, sent to the project's channel when it has one. The
@@ -692,6 +747,83 @@ mod tests {
             drop(store);
             let _ = std::fs::remove_dir_all(dir);
         });
+    }
+
+    #[test]
+    fn a_header_too_long_for_slack_moves_into_the_body_instead_of_failing() {
+        let short = payload("[P] Baseline \u{b7} Run 1", "details");
+        assert_eq!(
+            short["blocks"][0]["text"]["text"],
+            "[P] Baseline \u{b7} Run 1"
+        );
+        assert_eq!(short["blocks"][1]["text"]["text"], "details");
+
+        let long_header = format!("[P] Launching experiment run: {}", "x".repeat(200));
+        let long = payload(&long_header, "details");
+        let shown = long["blocks"][0]["text"]["text"].as_str().unwrap();
+        assert_eq!(shown.chars().count(), SLACK_HEADER_LIMIT);
+        assert!(shown.ends_with('\u{2026}'));
+        assert_eq!(
+            long["blocks"][1]["text"]["text"],
+            format!("{long_header}\n\ndetails")
+        );
+        assert_eq!(long["text"], format!("{long_header}\n\ndetails"));
+
+        // Counted in characters, not bytes: 150 multi-byte characters fit.
+        let wide = "\u{e9}".repeat(SLACK_HEADER_LIMIT);
+        assert_eq!(payload(&wide, "d")["blocks"][0]["text"]["text"], wide);
+    }
+
+    #[test]
+    fn the_drain_routes_a_message_an_older_process_queued() {
+        let dir = store_dir("route-at-send");
+        let store = Store::open_at(dir.clone()).unwrap();
+        let r = run();
+        store.upsert_run(&r).unwrap();
+        let queued = json!({ "text": "stuck" });
+        let route = |kind: &str, run_id: Option<&str>, payload: &Value| {
+            route_at_send(&store, kind, run_id, payload).unwrap()
+        };
+
+        // No override: nothing changes.
+        assert_eq!(
+            route("run_stalled", Some("run_1"), &queued),
+            Routing::Send { channel: None }
+        );
+
+        let mut settings = crate::store::ProjectSlack {
+            channel_id: Some("C0PROJECT01".into()),
+            ..Default::default()
+        };
+        settings.events.job_submitted = false;
+        store.set_project_slack("proj_1", &settings).unwrap();
+
+        assert_eq!(
+            route("run_stalled", Some("run_1"), &queued),
+            Routing::Send {
+                channel: Some("C0PROJECT01".into())
+            }
+        );
+        assert_eq!(
+            route("job_submitted", Some("run_1"), &queued),
+            Routing::Skip
+        );
+        // Already routed when queued: left as it is.
+        assert_eq!(
+            route(
+                "run_stalled",
+                Some("run_1"),
+                &json!({ "text": "x", "channel": "C0ELSEWHERE" })
+            ),
+            Routing::Send { channel: None }
+        );
+        // Not about a run: left alone.
+        assert_eq!(
+            route("digest_daily", None, &queued),
+            Routing::Send { channel: None }
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
