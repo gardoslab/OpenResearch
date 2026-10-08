@@ -153,6 +153,12 @@ export const getSlackSettingsQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getProjectSlackQuery = (projectId: string) => queryOptions({
+  queryKey: workspaceKey("getProjectSlack", projectId),
+  queryFn: ({ signal }) => api.getProjectSlack(projectId, signal),
+  staleTime: 300_000,
+});
+
 export const getHarnessSetupCommandsQuery = () => queryOptions({
   queryKey: workspaceKey("getHarnessSetupCommands"),
   queryFn: ({ signal }) => api.getHarnessSetupCommands(signal),

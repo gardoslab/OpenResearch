@@ -77,13 +77,13 @@ impl DigestKind {
         }
     }
 
-    fn enabled(self) -> bool {
-        let events = crate::telemetry::slack_event_settings();
-        let on = match self {
-            DigestKind::Daily => events.daily_digest,
-            DigestKind::Weekly => events.weekly_digest,
+    /// On globally and for this project, with something able to post.
+    fn enabled_for(self, store: &Store, project_id: &str) -> Result<bool> {
+        let event: crate::notify_events::SlackEvent = match self {
+            DigestKind::Daily => |events| events.daily_digest,
+            DigestKind::Weekly => |events| events.weekly_digest,
         };
-        on && crate::config::slack_can_post()
+        crate::notify_events::project_event_enabled(store, project_id, event)
     }
 }
 
@@ -436,9 +436,9 @@ fn weekly_prompt(project: &LocalProject, due: &Due, context: &DigestContext) -> 
     )
 }
 
-/// Runs every minute for as long as `orx up` does. Each digest kind's toggle,
-/// and whether a webhook is saved at all, is re-read every tick, so both take
-/// effect without a restart.
+/// Runs every minute for as long as `orx up` does. Each digest kind's toggles
+/// (global and per project), and whether anything can post at all, are
+/// re-read every tick, so they take effect without a restart.
 pub async fn watch_digests(
     chat: Arc<ChatHost>,
     data_dir_move_in_progress: Arc<std::sync::atomic::AtomicBool>,
@@ -476,15 +476,23 @@ enum Outcome {
 }
 
 async fn tick(chat: &Arc<ChatHost>, now: &Zoned) -> Result<()> {
-    let due = due_digest(now, DigestKind::Weekly.enabled());
-    if let Some(due) = due.filter(|due| due.kind.enabled()) {
-        let projects = Store::open()?.list_local_projects()?;
-        for project in projects {
-            match due.kind {
-                DigestKind::Daily => daily(&project, &due).await?,
-                DigestKind::Weekly => start_weekly(&project, &due).await?,
-            };
-        }
+    let projects = Store::open()?.list_local_projects()?;
+    for project in projects {
+        // Per project, so one with its weekly turned off still gets the
+        // Monday daily, exactly as everyone does when the weekly is off
+        // globally.
+        let due = {
+            let store = Store::open()?;
+            let weekly = DigestKind::Weekly.enabled_for(&store, &project.id)?;
+            match due_digest(now, weekly) {
+                Some(due) if due.kind.enabled_for(&store, &project.id)? => due,
+                _ => continue,
+            }
+        };
+        match due.kind {
+            DigestKind::Daily => daily(&project, &due).await?,
+            DigestKind::Weekly => start_weekly(&project, &due).await?,
+        };
     }
     advance_weekly(chat).await
 }
@@ -763,6 +771,17 @@ pub async fn send_digest_now(kind: &str) -> Result<SendNowReport> {
     .ok_or_else(|| crate::error::anyhow!("could not work out this week's dates"))?;
     let mut report = SendNowReport::default();
     for project in Store::open()?.list_local_projects()? {
+        // "Send now" ignores the global toggle, as before, but skips a project
+        // that turned this digest off for itself.
+        let events = Store::open()?.project_slack(&project.id)?.events;
+        let on = match due.kind {
+            DigestKind::Daily => events.daily_digest,
+            DigestKind::Weekly => events.weekly_digest,
+        };
+        if !on {
+            report.skipped += 1;
+            continue;
+        }
         let outcome = match due.kind {
             DigestKind::Daily => daily(&project, &due).await?,
             DigestKind::Weekly => start_weekly(&project, &due).await?,

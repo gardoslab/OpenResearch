@@ -8,7 +8,8 @@
 //!
 //! Intake is deliberately narrow. A reply is taken in only when it is in a
 //! thread the bot started about a chat (`slack_messages`), comes from an
-//! allow-listed Slack user, and is not a bot's own message: a reply lands in
+//! allow-listed Slack user (the chat's project's own list when it has one,
+//! else the global one), and is not a bot's own message: a reply lands in
 //! an agent with a shell, so everything else is dropped. What passes goes to
 //! `slack_inbox` *before* the envelope is acked, so a crash after the ack
 //! cannot lose it, and `(channel, ts)` being unique there turns Slack's
@@ -85,9 +86,10 @@ pub enum Intake {
 
 /// Take in one `message` event (live, or from a backfill with `channel`
 /// filled in) if it is a reply we should deliver. See the module doc.
+/// `global_allowed_user_ids` applies unless the thread's project has its own.
 pub fn intake(
     store: &Store,
-    allowed_user_ids: &[String],
+    global_allowed_user_ids: &[String],
     event: &Value,
 ) -> crate::error::Result<Intake> {
     if event["type"].as_str() != Some("message") {
@@ -118,7 +120,14 @@ pub fn intake(
     let Some(thread) = store.slack_thread(channel, thread_ts)? else {
         return Ok(Intake::Ignored("not a thread orx started"));
     };
-    if !allowed_user_ids.iter().any(|id| id == user) {
+    let project_allowed = match store.get_chat_session(&thread.chat_session_id)? {
+        Some(session) => store.project_slack(&session.project_id)?.allowed_user_ids,
+        None => None,
+    };
+    let allowed = project_allowed
+        .as_deref()
+        .unwrap_or(global_allowed_user_ids);
+    if !allowed.iter().any(|id| id == user) {
         return Ok(Intake::Ignored("sender not on the allow-list"));
     }
     let text = event["text"].as_str().unwrap_or_default().trim();
@@ -456,6 +465,55 @@ mod tests {
         broadcast["subtype"] = json!("thread_broadcast");
         assert_eq!(
             intake(&store, &["U1".to_string()], &broadcast).unwrap(),
+            Intake::Accepted
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_project_allow_list_replaces_the_global_one() {
+        let (store, dir) = store();
+        store
+            .create_chat_session(&crate::store::StoredChatSession {
+                id: "chat_A".into(),
+                project_id: "proj_1".into(),
+                harness: "codex".into(),
+                native_session_id: None,
+                title: None,
+                title_source: None,
+                model: None,
+                service_tier: None,
+                permission_mode: None,
+                plan_mode: false,
+                plan_reset_pending: false,
+                reasoning_level: None,
+                archived: false,
+                context_usage_json: None,
+                bootstrap_context: None,
+                goal: None,
+                active_leaf_id: None,
+                parent_session_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        store
+            .set_project_slack(
+                "proj_1",
+                &crate::store::ProjectSlack {
+                    allowed_user_ids: Some(vec!["U2".into()]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let global = vec!["U1".to_string()];
+        assert_eq!(
+            intake(&store, &global, &reply("U1", "101.0")).unwrap(),
+            Intake::Ignored("sender not on the allow-list")
+        );
+        assert_eq!(
+            intake(&store, &global, &reply("U2", "102.0")).unwrap(),
             Intake::Accepted
         );
         drop(store);

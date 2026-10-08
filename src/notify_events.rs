@@ -130,14 +130,35 @@ fn payload(header: &str, details: &str) -> Value {
     })
 }
 
-fn slack_ready(event_enabled: bool) -> bool {
-    event_enabled && crate::config::slack_can_post()
+/// Picks one event's toggle out of a `SlackEventSettings`.
+pub type SlackEvent = fn(&crate::telemetry::SlackEventSettings) -> bool;
+
+/// Whether `event` goes to Slack for this project: something can post, and
+/// the event is on both globally and for the project.
+pub fn project_event_enabled(store: &Store, project_id: &str, event: SlackEvent) -> Result<bool> {
+    Ok(crate::config::slack_can_post()
+        && event(&crate::telemetry::slack_event_settings())
+        && event(&store.project_slack(project_id)?.events))
+}
+
+/// The channel this project's messages go to when it overrides the global one.
+fn project_channel(store: &Store, project_id: &str) -> Result<Option<String>> {
+    Ok(store.project_slack(project_id)?.channel_id)
+}
+
+/// The finished payload, sent to the project's channel when it has one. The
+/// bot provider honors a payload's `channel`; a webhook ignores it.
+fn routed(mut payload: Value, channel: Option<String>) -> String {
+    if let Some(channel) = channel {
+        payload["channel"] = json!(channel);
+    }
+    payload.to_string()
 }
 
 /// Enqueue the "a run was submitted" notification, right after the launcher
 /// has upserted the run row with its final backend descriptor. A no-op
-/// (`Ok(())`, nothing enqueued) unless `slack_events.job_submitted` is on
-/// and a webhook is saved — see the module doc for why that's checked here
+/// (`Ok(())`, nothing enqueued) unless `job_submitted` is on, globally and
+/// for the project, and a webhook or bot is saved — see the module doc for why that's checked here
 /// rather than left to the drain loop.
 pub fn enqueue_job_submitted(
     store: &Store,
@@ -146,7 +167,7 @@ pub fn enqueue_job_submitted(
     run: &StoredRun,
     descriptor: &BackendDescriptor,
 ) -> Result<()> {
-    if !slack_ready(crate::telemetry::slack_event_settings().job_submitted) {
+    if !project_event_enabled(store, &project.id, |events| events.job_submitted)? {
         return Ok(());
     }
     let ordinal = run_ordinal(store, &experiment.id, &run.id)?;
@@ -169,7 +190,10 @@ pub fn enqueue_job_submitted(
         "job_submitted",
         Some(&run.id),
         run.chat_session_id.as_deref(),
-        &payload(&header, &details.join("\n")).to_string(),
+        &routed(
+            payload(&header, &details.join("\n")),
+            project_channel(store, &project.id)?,
+        ),
     )?;
     Ok(())
 }
@@ -177,7 +201,8 @@ pub fn enqueue_job_submitted(
 /// Enqueue the "a run's agent-driven outcome was synthesized" notification —
 /// called only from the wake-up turn's own completion hook
 /// (`local::chat::mod`), never for an ordinary chat turn or a failed one. A
-/// no-op unless `slack_events.run_synthesized` is on and a webhook is saved.
+/// no-op unless `run_synthesized` is on (globally and for the project) and
+/// a webhook or bot is saved.
 pub fn enqueue_run_synthesized(
     store: &Store,
     wakeup: &RunWakeup,
@@ -186,7 +211,7 @@ pub fn enqueue_run_synthesized(
     outcome_text: Option<&str>,
     description_changed: bool,
 ) -> Result<()> {
-    if !slack_ready(crate::telemetry::slack_event_settings().run_synthesized) {
+    if !project_event_enabled(store, &project.id, |events| events.run_synthesized)? {
         return Ok(());
     }
     let run = &wakeup.run;
@@ -219,7 +244,10 @@ pub fn enqueue_run_synthesized(
         "run_synthesized",
         Some(&run.id),
         Some(&wakeup.chat_session_id),
-        &payload(&header, &details.join("\n\n")).to_string(),
+        &routed(
+            payload(&header, &details.join("\n\n")),
+            project_channel(store, &project.id)?,
+        ),
     )?;
     Ok(())
 }
@@ -230,7 +258,8 @@ pub fn enqueue_run_synthesized(
 /// (Eqw) job, a stalled SSH session to the cluster, or a job gone quiet
 /// while still marked running. Unlike `enqueue_run_synthesized`, this never
 /// waits on the run reaching a terminal state, because a stuck run may not.
-/// A no-op unless `slack_events.run_stalled` is on and a webhook is saved,
+/// A no-op unless `run_stalled` is on (globally and for the project) and a
+/// webhook or bot is saved,
 /// and also while this run's previous stall ping is younger than
 /// `RUN_STALLED_MIN_INTERVAL`.
 pub fn enqueue_run_stalled(
@@ -241,7 +270,7 @@ pub fn enqueue_run_stalled(
     descriptor: &BackendDescriptor,
     reason: &str,
 ) -> Result<()> {
-    if !slack_ready(crate::telemetry::slack_event_settings().run_stalled) {
+    if !project_event_enabled(store, &project.id, |events| events.run_stalled)? {
         return Ok(());
     }
     if let Some(last) = store.last_run_notification_at("run_stalled", &run.id)? {
@@ -269,7 +298,10 @@ pub fn enqueue_run_stalled(
         "run_stalled",
         Some(&run.id),
         run.chat_session_id.as_deref(),
-        &payload(&header, &details.join("\n\n")).to_string(),
+        &routed(
+            payload(&header, &details.join("\n\n")),
+            project_channel(store, &project.id)?,
+        ),
     )?;
     Ok(())
 }
@@ -286,7 +318,14 @@ pub fn enqueue_digest(
     text: &str,
 ) -> Result<String> {
     let header = format!("[{}] {title}", project.name);
-    store.enqueue_notification(kind, None, &payload(&header, text.trim()).to_string())
+    store.enqueue_notification(
+        kind,
+        None,
+        &routed(
+            payload(&header, text.trim()),
+            project_channel(store, &project.id)?,
+        ),
+    )
 }
 
 /// Enqueue a message into the Slack thread `item` came from — the agent's
@@ -605,6 +644,51 @@ mod tests {
             stall(&other, "No new job output.");
             assert_eq!(store.list_pending_notifications(10).unwrap().len(), 2);
 
+            drop(store);
+            let _ = std::fs::remove_dir_all(dir);
+        });
+    }
+
+    #[test]
+    fn a_project_can_mute_an_event_and_send_to_its_own_channel() {
+        with_isolated_config_dir(|| {
+            crate::config::set_slack_webhook_url("https://hooks.slack.com/services/T0/B0/xyz")
+                .unwrap();
+            let dir = store_dir("project-overrides");
+            let store = Store::open_at(dir.clone()).unwrap();
+            let r = run();
+            store.upsert_run(&r).unwrap();
+            let mut settings = crate::store::ProjectSlack {
+                channel_id: Some("C0PROJECT01".into()),
+                ..Default::default()
+            };
+            settings.events.job_submitted = false;
+            store.set_project_slack("proj_1", &settings).unwrap();
+
+            enqueue_job_submitted(&store, &project(), &experiment(), &r, &descriptor()).unwrap();
+            assert!(store.list_pending_notifications(10).unwrap().is_empty());
+
+            enqueue_run_stalled(
+                &store,
+                &project(),
+                &experiment(),
+                &r,
+                &descriptor(),
+                "stuck",
+            )
+            .unwrap();
+            let pending = store.list_pending_notifications(10).unwrap();
+            assert_eq!(pending.len(), 1);
+            let payload: Value = serde_json::from_str(&pending[0].payload_json).unwrap();
+            assert_eq!(payload["channel"], "C0PROJECT01");
+
+            // Another project keeps the global channel.
+            let mut other = project();
+            other.id = "proj_2".into();
+            enqueue_digest(&store, &other, "digest_daily", "Daily", "text").unwrap();
+            let pending = store.list_pending_notifications(10).unwrap();
+            let payload: Value = serde_json::from_str(&pending[1].payload_json).unwrap();
+            assert!(payload.get("channel").is_none());
             drop(store);
             let _ = std::fs::remove_dir_all(dir);
         });

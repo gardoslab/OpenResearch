@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{anyhow, Result};
 use crate::local::model::{LocalExperiment, LocalProject};
@@ -375,6 +375,20 @@ pub struct StoredNotification {
     pub chat_session_id: Option<String>,
 }
 
+/// One project's Slack overrides (Settings → Slack → Projects). `None` means
+/// the global setting applies. An event is delivered for a project only
+/// when it is on both globally and here; every event is on here by default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSlack {
+    /// Where this project's messages go instead of the global channel.
+    /// Only the bot can choose a channel; a webhook posts where it was made.
+    pub channel_id: Option<String>,
+    /// Who may reply in this project's threads, in place of the global list.
+    pub allowed_user_ids: Option<Vec<String>>,
+    pub events: crate::telemetry::SlackEventSettings,
+}
+
 /// A bot-posted Slack message whose thread leads back to a chat session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlackThread {
@@ -708,6 +722,12 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_slack_inbox_state
                 ON slack_inbox(state, received_at);
+            CREATE TABLE IF NOT EXISTS project_slack (
+                project_id       TEXT PRIMARY KEY,
+                channel_id       TEXT,
+                allowed_user_ids TEXT,
+                events_json      TEXT NOT NULL DEFAULT '{}'
+            );
             CREATE TABLE IF NOT EXISTS slack_digests (
                 project_id  TEXT NOT NULL,
                 kind        TEXT NOT NULL,
@@ -1717,6 +1737,56 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// The project's Slack overrides; all defaults when none were saved.
+    pub fn project_slack(&self, project_id: &str) -> Result<ProjectSlack> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT channel_id, allowed_user_ids, events_json
+                 FROM project_slack WHERE project_id = ?1",
+                params![project_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((channel_id, allowed_user_ids, events_json)) = row else {
+            return Ok(ProjectSlack::default());
+        };
+        Ok(ProjectSlack {
+            channel_id,
+            allowed_user_ids: allowed_user_ids.and_then(|ids| serde_json::from_str(&ids).ok()),
+            events: serde_json::from_str(&events_json).unwrap_or_default(),
+        })
+    }
+
+    pub fn set_project_slack(&self, project_id: &str, settings: &ProjectSlack) -> Result<()> {
+        let allowed_user_ids = settings
+            .allowed_user_ids
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        self.conn.execute(
+            "INSERT INTO project_slack (project_id, channel_id, allowed_user_ids, events_json)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_id) DO UPDATE SET
+                 channel_id = excluded.channel_id,
+                 allowed_user_ids = excluded.allowed_user_ids,
+                 events_json = excluded.events_json",
+            params![
+                project_id,
+                settings.channel_id,
+                allowed_user_ids,
+                serde_json::to_string(&settings.events)?
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Remember that the bot posted `(channel, ts)` about `chat_session_id`,
     /// so a thread reply to it can find its way back.
     pub fn record_slack_thread(&self, thread: &SlackThread) -> Result<()> {
@@ -2310,6 +2380,10 @@ impl Store {
         let tx = self.begin()?;
         tx.execute(
             "DELETE FROM overleaf_links WHERE project_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM project_slack WHERE project_id = ?1",
             params![id],
         )?;
         tx.execute(
@@ -4841,6 +4915,41 @@ mod tests {
             Some("m2")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_slack_overrides_round_trip_and_default_to_inheriting() {
+        let dir = std::env::temp_dir().join(format!("orx-project-slack-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert_eq!(
+            store.project_slack("proj_1").unwrap(),
+            ProjectSlack::default()
+        );
+
+        let mut settings = ProjectSlack {
+            channel_id: Some("C0123456789".into()),
+            allowed_user_ids: Some(vec!["U1".into()]),
+            ..Default::default()
+        };
+        settings.events.weekly_digest = false;
+        store.set_project_slack("proj_1", &settings).unwrap();
+        assert_eq!(store.project_slack("proj_1").unwrap(), settings);
+
+        // An empty list is kept as "nobody", not read back as "inherit".
+        settings.allowed_user_ids = Some(Vec::new());
+        store.set_project_slack("proj_1", &settings).unwrap();
+        assert_eq!(
+            store.project_slack("proj_1").unwrap().allowed_user_ids,
+            Some(Vec::new())
+        );
+
+        store.delete_local_project("proj_1").unwrap();
+        assert_eq!(
+            store.project_slack("proj_1").unwrap(),
+            ProjectSlack::default()
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn chat_session_fixture(id: &str) -> StoredChatSession {

@@ -202,9 +202,9 @@ pub(crate) struct ProfilePaper {
 /// is the one settings struct where "off" must be an explicit save, not
 /// merely an absent field (unlike `telemetry_disabled`, where absence means
 /// enabled by a different mechanism entirely).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SlackEventSettings {
+pub struct SlackEventSettings {
     #[serde(default = "default_true")]
     pub job_submitted: bool,
     #[serde(default = "default_true")]
