@@ -2,7 +2,7 @@
 
 ## [0.5.2]
 
-Slack settings per project (Settings → Slack → Per project): send a project's messages to its own channel (needs the bot token), choose who may reply in its threads, and turn any notification or digest off for that project alone. A message goes out only when it is on both globally and for the project; anything not set for a project follows the global settings.
+Slack settings per project, in each project's Settings: send a project's messages to its own channel (needs the bot token), choose who may reply in its threads, and turn any notification or digest off for that project alone. A message goes out only when it is on both globally and for the project; anything not set for a project follows the global settings, which now have their own Slack tab on the Projects page.
 
 ## [0.5.0]
 
