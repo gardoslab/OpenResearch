@@ -15,6 +15,7 @@ import {
 
 import { NewProjectForm } from "./NewProjectForm";
 import { Button } from "./ui";
+import { SlackGlobalSettings } from "./SettingsPage";
 
 export function NewProjectDialog({
   onClose,
@@ -202,6 +203,18 @@ function DeleteProjectDialog({
   );
 }
 
+type HomeTab = "projects" | "slack";
+
+/** The tab in the URL hash, so a reload or a shared link lands on the same one. */
+function initialHomeTab(): HomeTab {
+  return window.location.hash === "#slack" ? "slack" : "projects";
+}
+
+const HOME_TABS: { id: HomeTab; label: () => string }[] = [
+  { id: "projects", label: m.projects_home_projects },
+  { id: "slack", label: m.settings_page_slack },
+];
+
 function LiveDot() {
   return (
     <span className="activity-pulse h-2 w-2 shrink-0 rounded-full bg-accent-teal animate-[or-pulse_1.2s_ease-in-out_infinite]" />
@@ -225,6 +238,11 @@ export function ProjectsHome({
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [projectPendingDelete, setProjectPendingDelete] = useState<Project | null>(null);
+  const [tab, setTab] = useState<HomeTab>(initialHomeTab);
+  const selectTab = (next: HomeTab) => {
+    setTab(next);
+    window.history.replaceState(window.history.state, "", next === "projects" ? window.location.pathname + window.location.search : "#slack");
+  };
   const activity = useQuery(listProjectActivityQuery());
   const activityByProject = Object.fromEntries((activity.data ?? []).map((summary) => [summary.projectId, summary]));
 
@@ -247,13 +265,34 @@ export function ProjectsHome({
     <div className="home flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges] bg-canvas">
       <div className="home-inner max-w-290 my-0 mx-auto pt-12 px-6 pb-16 [@media((max-width:_960px))]:pt-6 [@media((max-width:_960px))]:px-4">
         <div className="home-head flex items-center justify-between gap-3 mb-4.5 [&_h2]:m-0 [&_h2]:text-4xl [&_h2]:tracking-[-0.02em] [@media((max-width:_520px))]:items-start [@media((max-width:_520px))]:flex-col">
-          <h2>{m.projects_home_projects()}</h2>
-          <Button
-            onClick={() => setModalOpen(true)}
-          >
-            <Plus size={15} /> {m.projects_home_new_project()}
-          </Button>
+          <h2>{tab === "slack" ? m.settings_page_slack() : m.projects_home_projects()}</h2>
+          {tab === "projects" && (
+            <Button
+              onClick={() => setModalOpen(true)}
+            >
+              <Plus size={15} /> {m.projects_home_new_project()}
+            </Button>
+          )}
         </div>
+        <div role="tablist" className="flex gap-1 mb-4.5 border-b border-border">
+          {HOME_TABS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              role="tab"
+              aria-selected={tab === item.id}
+              className={`-mb-px border-b-2 px-3 py-2 text-sm ${tab === item.id ? "border-text font-medium text-text" : "border-transparent text-subtext hover:text-text"}`}
+              onClick={() => selectTab(item.id)}
+            >
+              {item.label()}
+            </button>
+          ))}
+        </div>
+        {tab === "slack" ? (
+          <div className="max-w-readable">
+            <SlackGlobalSettings heading={false} />
+          </div>
+        ) : (
         <div className="home-list overflow-hidden rounded-lg border border-border bg-background">
           <div>
             <div className="grid grid-cols-[minmax(0,1fr)_9rem_9rem_minmax(18rem,max-content)] items-center gap-3 border-b border-border bg-background py-2.5 ps-4 pe-2 text-xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:hidden">
@@ -378,6 +417,7 @@ export function ProjectsHome({
             )}
           </div>
         </div>
+        )}
       </div>
 
       {modalOpen && (

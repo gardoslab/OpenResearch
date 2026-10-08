@@ -36,7 +36,7 @@ import {
 } from "../queries/settings";
 
 import { getOverleafSettingsQuery } from "../queries/files";
-import { listProjectsQuery, listRunsQuery } from "../queries/projects";
+import { listRunsQuery } from "../queries/projects";
 import {
   ArrowLeft,
   ArrowRight,
@@ -3416,17 +3416,6 @@ function slackEventTitle(key: keyof SlackEvents): string {
   }
 }
 
-/** What a project changes from the global Slack settings, in a few words. */
-function projectSlackSummary(settings: ProjectSlack | undefined): string {
-  if (!settings) return "";
-  const parts: string[] = [];
-  if (settings.channelId) parts.push(settings.channelId);
-  const off = SLACK_EVENT_KEYS.filter((key) => !settings.events[key]).length;
-  if (off > 0) parts.push(m.settings_page_slack_project_muted({ count: off }));
-  if (settings.allowedUserIds !== null) parts.push(m.settings_page_slack_project_custom_repliers());
-  return parts.length > 0 ? parts.join(" · ") : m.settings_page_slack_project_inherits();
-}
-
 function SlackProjectEditor({
   projectId,
   initial,
@@ -3461,7 +3450,7 @@ function SlackProjectEditor({
   };
 
   return (
-    <form className="flex flex-col gap-2 mt-2 pl-3 border-l border-border" onSubmit={save}>
+    <form className="flex flex-col gap-2 mt-2" onSubmit={save}>
       <label className="flex flex-col gap-1 text-sm">
         <span>{m.settings_page_slack_channel_id()}</span>
         <Input
@@ -3515,41 +3504,31 @@ function SlackProjectEditor({
   );
 }
 
-/** Settings → Slack → per project: a channel, a reply list, and event toggles that override the global ones. */
-function SlackProjectSettings({ global }: { global: SlackSettings }) {
-  const projects = useQuery(listProjectsQuery()).data ?? [];
-  const settings = useQueries({ queries: projects.map((project) => getProjectSlackQuery(project.id)) });
-  const [open, setOpen] = useState<string | null>(null);
+/** Settings → Slack: the open project's channel, reply list, and event toggles, overriding the global Slack settings on the Projects page. */
+function ProjectSlackSection({ project }: { project: Project }) {
+  const global = useQuery(getSlackSettingsQuery());
+  const current = useQuery(getProjectSlackQuery(project.id));
+  const error = global.error?.message ?? current.error?.message ?? null;
+  const configured = !!global.data && (global.data.hasWebhook || global.data.app.hasBotToken);
 
   return (
     <>
-      <h3 className="mt-4 text-base font-medium">{m.settings_page_slack_projects_title()}</h3>
-      <p>{m.settings_page_slack_projects_description()}</p>
-      {projects.length === 0 && <p className="text-sm text-subtext">{m.settings_page_slack_projects_empty()}</p>}
-      {projects.map((project, index) => {
-        const current = settings[index]?.data;
-        return (
-          <div key={project.id} className="mt-2">
-            <div className={KV_CLASS_NAME}>
-              <span className="k">{project.name}</span>
-              <span className="v">
-                <span className="mr-2 text-sm text-subtext">{projectSlackSummary(current)}</span>
-                <Button disabled={!current} onClick={() => setOpen(open === project.id ? null : project.id)}>
-                  {open === project.id ? m.settings_page_slack_project_close() : m.settings_page_slack_project_edit()}
-                </Button>
-              </span>
-            </div>
-            {open === project.id && current && (
-              <SlackProjectEditor key={JSON.stringify(current)} projectId={project.id} initial={current} global={global} />
-            )}
-          </div>
-        );
-      })}
+      <h2>{m.settings_page_slack()}</h2>
+      {!global.data || !current.data ? (
+        error ? <div className="error">{error}</div> : <LoadingRow><Spinner /> {m.settings_page_loading()}</LoadingRow>
+      ) : (
+        <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`}>
+          <p>{m.settings_page_slack_project_description({ project: project.name })}</p>
+          {!configured && <p className="text-sm text-subtext">{m.settings_page_slack_project_not_set_up()}</p>}
+          <SlackProjectEditor key={JSON.stringify(current.data)} projectId={project.id} initial={current.data} global={global.data} />
+        </div>
+      )}
     </>
   );
 }
 
-function SlackSection() {
+/** The Slack settings shared by every project: the Slack tab on the Projects page. */
+export function SlackGlobalSettings({ heading = true }: { heading?: boolean }) {
   const deleteWebhookMutation = useMutation({ mutationFn: deleteSlackWebhook });
   const setEventsMutation = useMutation({ mutationFn: setSlackEvents });
 
@@ -3631,12 +3610,13 @@ function SlackSection() {
 
   return (
     <>
-      <h2>{m.settings_page_slack()}</h2>
+      {heading && <h2>{m.settings_page_slack()}</h2>}
       {!settings ? (
         error ? <div className="error">{error}</div> : <LoadingRow><Spinner /> {m.settings_page_loading()}</LoadingRow>
       ) : (
         <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`}>
           <p>{m.settings_page_slack_description()}</p>
+          <p className="text-sm text-subtext">{m.settings_page_slack_global_overrides_hint()}</p>
           <div className={KV_CLASS_NAME}>
             <span className="k">{m.settings_page_slack_webhook()}</span>
             <span className="v">
@@ -3736,7 +3716,6 @@ function SlackSection() {
               {sendingDigest === "weekly" ? m.settings_page_slack_digest_sending() : m.settings_page_slack_send_weekly_digest()}
             </Button>
           </div>
-          <SlackProjectSettings global={settings} />
           {error && <div className="error">{error}</div>}
         </div>
       )}
@@ -4711,9 +4690,11 @@ export function SettingsView({
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <TelemetryTab />
             </section>
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <SlackSection />
-            </section>
+            {project && (
+              <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                <ProjectSlackSection project={project} />
+              </section>
+            )}
             {!remote && (
               <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
                 <UpdatesTab />
