@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.5.2]
+
+Slack settings per project (Settings → Slack → Per project): send a project's messages to its own channel (needs the bot token), choose who may reply in its threads, and turn any notification or digest off for that project alone. A message goes out only when it is on both globally and for the project; anything not set for a project follows the global settings.
+
 ## [0.5.0]
 
 Reply to orx from Slack: with the Slack app's bot and app-level tokens saved, orx posts as the app, and a reply in a run message's thread from an allow-listed member goes to the chat that ran it. The agent's answer is posted back into the thread. One machine holds the Socket Mode connection ("Receive replies on this machine"), and replies sent while it was offline are picked up when it reconnects. The app needs the `message.channels` event (`message.groups` for private channels); see `docs/slack-app-manifest.yaml`.

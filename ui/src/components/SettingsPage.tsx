@@ -29,13 +29,14 @@ import {
   getEnvVarsQuery,
   getTelemetryQuery,
   getSlackSettingsQuery,
+  getProjectSlackQuery,
   getProjectDefaultsQuery,
   getProjectGitStatusQuery,
   getDataDirQuery,
 } from "../queries/settings";
 
 import { getOverleafSettingsQuery } from "../queries/files";
-import { listRunsQuery } from "../queries/projects";
+import { listProjectsQuery, listRunsQuery } from "../queries/projects";
 import {
   ArrowLeft,
   ArrowRight,
@@ -70,6 +71,7 @@ import {
   deleteSlackWebhook,
   setSlackEvents,
   setSlackApp,
+  setProjectSlack,
   slackPreflight,
   sendSlackDigest,
   saveOverleafSession,
@@ -105,6 +107,7 @@ import {
   type SlackEvents,
   type SlackApp,
   type SlackAppUpdate,
+  type ProjectSlack,
   type SlackPreflightResult,
   type SlackDigestReport,
   type Harness,
@@ -3401,6 +3404,151 @@ function SlackAppSettings({ settings, onSaved }: { settings: SlackSettings; onSa
   );
 }
 
+const SLACK_EVENT_KEYS: (keyof SlackEvents)[] = ["jobSubmitted", "runStalled", "runSynthesized", "dailyDigest", "weeklyDigest"];
+
+function slackEventTitle(key: keyof SlackEvents): string {
+  switch (key) {
+    case "jobSubmitted": return m.settings_page_slack_job_submitted_title();
+    case "runStalled": return m.settings_page_slack_run_stalled_title();
+    case "runSynthesized": return m.settings_page_slack_run_synthesized_title();
+    case "dailyDigest": return m.settings_page_slack_daily_digest_title();
+    case "weeklyDigest": return m.settings_page_slack_weekly_digest_title();
+  }
+}
+
+/** What a project changes from the global Slack settings, in a few words. */
+function projectSlackSummary(settings: ProjectSlack | undefined): string {
+  if (!settings) return "";
+  const parts: string[] = [];
+  if (settings.channelId) parts.push(settings.channelId);
+  const off = SLACK_EVENT_KEYS.filter((key) => !settings.events[key]).length;
+  if (off > 0) parts.push(m.settings_page_slack_project_muted({ count: off }));
+  if (settings.allowedUserIds !== null) parts.push(m.settings_page_slack_project_custom_repliers());
+  return parts.length > 0 ? parts.join(" · ") : m.settings_page_slack_project_inherits();
+}
+
+function SlackProjectEditor({
+  projectId,
+  initial,
+  global,
+}: {
+  projectId: string;
+  initial: ProjectSlack;
+  global: SlackSettings;
+}) {
+  const [channelId, setChannelId] = useState(initial.channelId ?? "");
+  const [useGlobalRepliers, setUseGlobalRepliers] = useState(initial.allowedUserIds === null);
+  const [repliers, setRepliers] = useState((initial.allowedUserIds ?? []).join(", "));
+  const [events, setEvents] = useState<SlackEvents>(initial.events);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const draft: ProjectSlack = {
+    channelId: channelId.trim() === "" ? null : channelId.trim(),
+    allowedUserIds: useGlobalRepliers ? null : repliers.split(/[\s,]+/).filter(Boolean),
+    events,
+  };
+  const dirty = JSON.stringify(draft) !== JSON.stringify(initial);
+  const save = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (saving || !dirty) return;
+    setSaving(true);
+    setError(null);
+    void setProjectSlack(projectId, draft)
+      .then((saved) => setScopedQueryData(getProjectSlackQuery(projectId).queryKey, saved))
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setSaving(false));
+  };
+
+  return (
+    <form className="flex flex-col gap-2 mt-2 pl-3 border-l border-border" onSubmit={save}>
+      <label className="flex flex-col gap-1 text-sm">
+        <span>{m.settings_page_slack_channel_id()}</span>
+        <Input
+          value={channelId}
+          onChange={(e) => setChannelId(e.target.value)}
+          placeholder={global.app.channelId || m.settings_page_slack_project_channel_placeholder()}
+          autoComplete="off"
+        />
+        {!global.app.hasBotToken && <span className="text-subtext">{m.settings_page_slack_project_channel_needs_bot()}</span>}
+      </label>
+      <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+        <div>
+          <div className="project-default-title text-base font-medium">{m.settings_page_slack_project_use_global_repliers()}</div>
+          <p>{global.app.allowedUserIds.join(", ") || m.settings_not_set()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={useGlobalRepliers}
+          aria-label={m.settings_page_slack_project_use_global_repliers()}
+          onClick={() => setUseGlobalRepliers(!useGlobalRepliers)}
+        />
+      </div>
+      {!useGlobalRepliers && (
+        <label className="flex flex-col gap-1 text-sm">
+          <span>{m.settings_page_slack_allowed_users()}</span>
+          <Input value={repliers} onChange={(e) => setRepliers(e.target.value)} placeholder="U0123456789, U0987654321" autoComplete="off" />
+          <span className="text-subtext">{m.settings_page_slack_project_repliers_hint()}</span>
+        </label>
+      )}
+      {SLACK_EVENT_KEYS.map((key) => (
+        <div key={key} className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+          <div>
+            <div className="project-default-title text-base font-medium">{slackEventTitle(key)}</div>
+            {!global.events[key] && <p>{m.settings_page_slack_project_off_globally()}</p>}
+          </div>
+          <Switch
+            type="button"
+            checked={events[key]}
+            aria-label={slackEventTitle(key)}
+            onClick={() => setEvents({ ...events, [key]: !events[key] })}
+          />
+        </div>
+      ))}
+      <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
+        <Button type="submit" disabled={saving || !dirty}>
+          {saving ? m.common_saving() : m.common_save()}
+        </Button>
+      </div>
+      {error && <div className="error">{error}</div>}
+    </form>
+  );
+}
+
+/** Settings → Slack → per project: a channel, a reply list, and event toggles that override the global ones. */
+function SlackProjectSettings({ global }: { global: SlackSettings }) {
+  const projects = useQuery(listProjectsQuery()).data ?? [];
+  const settings = useQueries({ queries: projects.map((project) => getProjectSlackQuery(project.id)) });
+  const [open, setOpen] = useState<string | null>(null);
+
+  return (
+    <>
+      <h3 className="mt-4 text-base font-medium">{m.settings_page_slack_projects_title()}</h3>
+      <p>{m.settings_page_slack_projects_description()}</p>
+      {projects.length === 0 && <p className="text-sm text-subtext">{m.settings_page_slack_projects_empty()}</p>}
+      {projects.map((project, index) => {
+        const current = settings[index]?.data;
+        return (
+          <div key={project.id} className="mt-2">
+            <div className={KV_CLASS_NAME}>
+              <span className="k">{project.name}</span>
+              <span className="v">
+                <span className="mr-2 text-sm text-subtext">{projectSlackSummary(current)}</span>
+                <Button disabled={!current} onClick={() => setOpen(open === project.id ? null : project.id)}>
+                  {open === project.id ? m.settings_page_slack_project_close() : m.settings_page_slack_project_edit()}
+                </Button>
+              </span>
+            </div>
+            {open === project.id && current && (
+              <SlackProjectEditor key={JSON.stringify(current)} projectId={project.id} initial={current} global={global} />
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 function SlackSection() {
   const deleteWebhookMutation = useMutation({ mutationFn: deleteSlackWebhook });
   const setEventsMutation = useMutation({ mutationFn: setSlackEvents });
@@ -3588,6 +3736,7 @@ function SlackSection() {
               {sendingDigest === "weekly" ? m.settings_page_slack_digest_sending() : m.settings_page_slack_send_weekly_digest()}
             </Button>
           </div>
+          <SlackProjectSettings global={settings} />
           {error && <div className="error">{error}</div>}
         </div>
       )}

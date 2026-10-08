@@ -1663,6 +1663,20 @@ export const setSlackEvents = (events: SlackEvents) =>
 export const setSlackApp = (update: SlackAppUpdate) =>
   post<SlackSettings>("/api/settings/slack/app", update);
 
+/** One project's Slack overrides. `null` channel or allow-list follows the global one; an empty list lets nobody reply. */
+export interface ProjectSlack {
+  channelId: string | null;
+  allowedUserIds: string[] | null;
+  /** An event reaches Slack for this project only when it is on both here and globally. */
+  events: SlackEvents;
+}
+
+export const getProjectSlack = (projectId: string, signal?: AbortSignal) =>
+  get<ProjectSlack>(`/api/projects/${projectId}/slack`, signal);
+
+export const setProjectSlack = (projectId: string, settings: ProjectSlack) =>
+  post<ProjectSlack>(`/api/projects/${projectId}/slack`, settings);
+
 export interface SlackDigestReport {
   sent: number;
   skipped: number;

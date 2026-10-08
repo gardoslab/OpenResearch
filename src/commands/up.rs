@@ -40,7 +40,8 @@ use crate::local::is_terminal;
 use crate::local::opencode::AgentHost;
 use crate::notify::NotificationProvider;
 use crate::store::{
-    log_path, now_ms, SshHostTest, Store, StoredAgentSelection, StoredChatSession, StoredRun,
+    log_path, now_ms, ProjectSlack, SshHostTest, Store, StoredAgentSelection, StoredChatSession,
+    StoredRun,
 };
 use crate::updates;
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
@@ -490,6 +491,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
                 .delete(delete_project),
         )
         .route("/api/projects/{id}/open", post(open_project))
+        .route(
+            "/api/projects/{id}/slack",
+            get(project_slack_settings).post(set_project_slack_settings),
+        )
         .route("/api/projects/{id}/git", get(project_git_status))
         .route(
             "/api/projects/{id}/starter-prompts",
@@ -5518,6 +5523,44 @@ struct SetSlackAppReq {
 
 /// Checks the shape of what Settings → Slack sends for the app, so a token
 /// pasted into the wrong field fails here with a message saying so.
+fn is_slack_id(id: &str, prefixes: &[char]) -> bool {
+    id.len() >= 9
+        && id.starts_with(prefixes)
+        && id
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
+/// A trimmed channel ID, or `""`; anything else is refused with a hint.
+fn slack_channel_id(raw: &str) -> std::result::Result<String, String> {
+    let channel_id = raw.trim().to_string();
+    if !channel_id.is_empty() && !is_slack_id(&channel_id, &['C', 'G']) {
+        return Err(
+            "The channel ID looks like C0123456789 — in Slack, open the channel's details and \
+             copy it from the bottom of the About tab."
+                .to_string(),
+        );
+    }
+    Ok(channel_id)
+}
+
+/// Trimmed, deduplicated member IDs, blanks dropped.
+fn slack_member_ids(raw: &[String]) -> std::result::Result<Vec<String>, String> {
+    let mut ids = Vec::new();
+    for id in raw.iter().map(|id| id.trim()).filter(|id| !id.is_empty()) {
+        if !is_slack_id(id, &['U', 'W']) {
+            return Err(format!(
+                "{id} is not a Slack member ID. They look like U0123456789 — open the \
+                 person's profile, then ⋮ → Copy member ID."
+            ));
+        }
+        if !ids.iter().any(|seen| seen == id) {
+            ids.push(id.to_string());
+        }
+    }
+    Ok(ids)
+}
+
 fn validate_slack_app(
     req: SetSlackAppReq,
     saved: crate::config::SlackApp,
@@ -5534,38 +5577,8 @@ fn validate_slack_app(
             Some(_) => Err(format!("The {what} should start with {prefix}.")),
         }
     }
-    let channel_id = req.channel_id.trim().to_string();
-    let is_slack_id = |id: &str, prefixes: &[char]| {
-        id.len() >= 9
-            && id.starts_with(prefixes)
-            && id
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-    };
-    if !channel_id.is_empty() && !is_slack_id(&channel_id, &['C', 'G']) {
-        return Err(
-            "The channel ID looks like C0123456789 — in Slack, open the channel's details and \
-             copy it from the bottom of the About tab."
-                .to_string(),
-        );
-    }
-    let mut allowed_user_ids = Vec::new();
-    for id in req
-        .allowed_user_ids
-        .iter()
-        .map(|id| id.trim())
-        .filter(|id| !id.is_empty())
-    {
-        if !is_slack_id(id, &['U', 'W']) {
-            return Err(format!(
-                "{id} is not a Slack member ID. They look like U0123456789 — open the \
-                 person's profile, then ⋮ → Copy member ID."
-            ));
-        }
-        if !allowed_user_ids.iter().any(|seen| seen == id) {
-            allowed_user_ids.push(id.to_string());
-        }
-    }
+    let channel_id = slack_channel_id(&req.channel_id)?;
+    let allowed_user_ids = slack_member_ids(&req.allowed_user_ids)?;
     Ok(crate::config::SlackApp {
         bot_token: token(req.bot_token, saved.bot_token, "xoxb-", "bot token")?,
         app_token: token(req.app_token, saved.app_token, "xapp-", "app-level token")?,
@@ -5700,6 +5713,59 @@ async fn slack_send_digest(Json(req): Json<SlackSendDigestReq>) -> ApiResult {
         "skipped": report.skipped,
         "failed": report.failed,
     })))
+}
+
+/// One project's Slack overrides (Settings → Slack → Projects). `null`
+/// channel or allow-list means the global one applies.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetProjectSlackReq {
+    channel_id: Option<String>,
+    allowed_user_ids: Option<Vec<String>>,
+    events: crate::telemetry::SlackEventSettings,
+}
+
+fn validate_project_slack(req: SetProjectSlackReq) -> std::result::Result<ProjectSlack, String> {
+    let channel_id = match req.channel_id {
+        Some(raw) => Some(slack_channel_id(&raw)?).filter(|id| !id.is_empty()),
+        None => None,
+    };
+    let allowed_user_ids = req
+        .allowed_user_ids
+        .map(|ids| slack_member_ids(&ids))
+        .transpose()?;
+    Ok(ProjectSlack {
+        channel_id,
+        allowed_user_ids,
+        events: req.events,
+    })
+}
+
+async fn project_slack_settings(Path(id): Path<String>) -> ApiResult {
+    blocking_api(move || {
+        let store = Store::open()?;
+        store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        Ok(Json(json!(store.project_slack(&id)?)))
+    })
+    .await
+}
+
+async fn set_project_slack_settings(
+    Path(id): Path<String>,
+    Json(req): Json<SetProjectSlackReq>,
+) -> ApiResult {
+    blocking_api(move || {
+        let settings = validate_project_slack(req).map_err(|e| bad_request(&e))?;
+        let store = Store::open()?;
+        store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        store.set_project_slack(&id, &settings)?;
+        Ok(Json(json!(settings)))
+    })
+    .await
 }
 
 // --- updates -----------------------------------------------------------------
@@ -9399,6 +9465,32 @@ mod tests {
         assert!(validate_slack_app(req(Some("xapp-wrong-field"), "", &[]), saved.clone()).is_err());
         assert!(validate_slack_app(req(None, "#general", &[]), saved.clone()).is_err());
         assert!(validate_slack_app(req(None, "", &["jdoe"]), saved).is_err());
+    }
+
+    #[test]
+    fn project_slack_overrides_are_checked_and_blank_means_inherit() {
+        let req = |channel: Option<&str>, users: Option<&[&str]>| SetProjectSlackReq {
+            channel_id: channel.map(str::to_string),
+            allowed_user_ids: users.map(|users| users.iter().map(|u| u.to_string()).collect()),
+            events: Default::default(),
+        };
+        let settings = validate_project_slack(req(Some(" "), None)).unwrap();
+        assert_eq!(
+            settings.channel_id, None,
+            "a blank channel inherits the global one"
+        );
+        assert_eq!(settings.allowed_user_ids, None);
+
+        let settings = validate_project_slack(req(Some("C0123456789"), Some(&[]))).unwrap();
+        assert_eq!(settings.channel_id.as_deref(), Some("C0123456789"));
+        assert_eq!(
+            settings.allowed_user_ids,
+            Some(Vec::new()),
+            "an empty list means nobody"
+        );
+
+        assert!(validate_project_slack(req(Some("#lab"), None)).is_err());
+        assert!(validate_project_slack(req(None, Some(&["jdoe"]))).is_err());
     }
 
     #[test]
