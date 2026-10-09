@@ -187,7 +187,7 @@ pub async fn drain_once(
         if notification.attempts >= MAX_ATTEMPTS {
             continue;
         }
-        let payload: Value = match serde_json::from_str(&notification.payload_json) {
+        let mut payload: Value = match serde_json::from_str(&notification.payload_json) {
             Ok(value) => value,
             Err(err) => {
                 // Never sendable — record it and let MAX_ATTEMPTS retire the
@@ -196,6 +196,25 @@ pub async fn drain_once(
                 continue;
             }
         };
+        match crate::notify_events::route_at_send(
+            &store,
+            &notification.kind,
+            notification.run_id.as_deref(),
+            &payload,
+        ) {
+            // Muted for its project: nothing to deliver. Marked sent so it
+            // leaves the queue instead of being retried forever.
+            Ok(crate::notify_events::Routing::Skip) => {
+                store.mark_notification_sent(&notification.id)?;
+                continue;
+            }
+            Ok(crate::notify_events::Routing::Send {
+                channel: Some(channel),
+            }) => payload["channel"] = Value::String(channel),
+            Ok(crate::notify_events::Routing::Send { channel: None }) => {}
+            // Settings that cannot be read are no reason to hold a message.
+            Err(err) => eprintln!("orx up: could not apply project Slack settings: {err}"),
+        }
         match provider.send(&notification.kind, &payload).await {
             DeliveryOutcome::Sent(posted) => {
                 store.mark_notification_sent(&notification.id)?;
@@ -368,6 +387,68 @@ mod tests {
         assert_eq!(store.slack_thread("C1", "2.0").unwrap(), None);
         assert_eq!(store.slack_thread("C1", "3.0").unwrap(), None);
         drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A row as an older `orx supervise` queued it: about a run, no `channel`.
+    #[tokio::test]
+    async fn the_drain_applies_a_projects_settings_to_rows_queued_without_them() {
+        let dir = temp_dir();
+        let store = open(&dir);
+        store
+            .upsert_run(&crate::store::StoredRun {
+                id: "run_1".into(),
+                experiment_id: "exp_1".into(),
+                project_id: "proj_1".into(),
+                status: "running".into(),
+                backend_json: "{}".into(),
+                command: "python train.py".into(),
+                created_at: 1,
+                updated_at: 1,
+                ended_at: None,
+                exit_code: None,
+                commit_sha: None,
+                result_markdown: None,
+                cancel_requested: false,
+                chat_session_id: None,
+            })
+            .unwrap();
+        let mut settings = crate::store::ProjectSlack {
+            channel_id: Some("C0PROJECT01".into()),
+            ..Default::default()
+        };
+        settings.events.job_submitted = false;
+        store.set_project_slack("proj_1", &settings).unwrap();
+        store
+            .enqueue_notification("run_stalled", Some("run_1"), "{\"text\":\"stuck\"}")
+            .unwrap();
+        store
+            .enqueue_notification("job_submitted", Some("run_1"), "{\"text\":\"launching\"}")
+            .unwrap();
+        store
+            .enqueue_notification("digest_daily", None, "{\"text\":\"digest\"}")
+            .unwrap();
+        drop(store);
+        let provider = ScriptedProvider::new(vec![]);
+
+        drain_once(open(&dir), &provider).await.unwrap();
+
+        let calls = provider.calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            2,
+            "the muted job_submitted never reaches Slack"
+        );
+        assert_eq!(calls[0].1["channel"], "C0PROJECT01");
+        assert!(
+            calls[1].1.get("channel").is_none(),
+            "a digest keeps the global channel"
+        );
+        drop(calls);
+        assert!(open(&dir)
+            .list_pending_notifications(10)
+            .unwrap()
+            .is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

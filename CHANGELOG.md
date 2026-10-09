@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.3]
+
+Per-project Slack settings now also apply to messages queued by a run supervisor that started before an update: the channel and the muted events are applied when the message is sent, so a project's override no longer depends on which version queued it. Restarting a run's supervisor (Resync on the run) still picks up everything else new.
+
+The "no new job output" stall notice no longer fires on a job that is writing. The supervisor's copy of a log only moves when a complete line arrives, so a job drawing a progress bar looked silent; it now asks the cluster how long its log has gone unwritten before announcing anything. The silence threshold is raised from 30 minutes to 2 hours.
+
+Run-launch messages with a long experiment title are no longer refused by Slack. Its header line is limited to 150 characters, and a longer one made Slack reject the whole message; the header is now shortened and the full line moves to the top of the message body.
+
 ## [0.5.2]
 
 Slack settings per project, in each project's Settings: send a project's messages to its own channel (needs the bot token), choose who may reply in its threads, and turn any notification or digest off for that project alone. A message goes out only when it is on both globally and for the project; anything not set for a project follows the global settings, which now have their own Slack tab on the Projects page.

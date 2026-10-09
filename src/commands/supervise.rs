@@ -1418,10 +1418,49 @@ fn stall_backoff(probes: u32, grace_expired: bool) -> Duration {
 
 /// How long a `RUNNING` job may go without touching its log before the
 /// silence itself counts as a stall trigger. Well past ordinary quiet spells
-/// (a slow data-loading epoch, a checkpoint write) but short enough to still
-/// be useful — a job wedged on a dead GPU or a hung collective otherwise
-/// looks identical to a healthy one until `h_rt` finally kills it.
-const LOG_SILENCE_THRESHOLD: Duration = Duration::from_secs(30 * 60);
+/// (a slow data-loading epoch, a long evaluation, a checkpoint write) but
+/// short enough to still be useful — a job wedged on a dead GPU or a hung
+/// collective otherwise looks identical to a healthy one until `h_rt` finally
+/// kills it.
+const LOG_SILENCE_THRESHOLD: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// Once the local mirror has been still for [`LOG_SILENCE_THRESHOLD`], how
+/// often to ask the cluster whether its log really has been.
+const LOG_SILENCE_RECHECK: Duration = Duration::from_secs(60);
+
+/// What the cluster's answer about the log's age means for the stall notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogSilence {
+    /// Written recently, though the mirror missed it (a progress bar redraws
+    /// one line and never ends it). Silent only since `quiet_for` ago.
+    Active {
+        quiet_for: Duration,
+    },
+    Silent,
+    /// The cluster could not be asked; say nothing and ask again.
+    Unknown,
+}
+
+fn judge_log_silence(age: Option<Duration>, threshold: Duration) -> LogSilence {
+    match age {
+        Some(age) if age < threshold => LogSilence::Active { quiet_for: age },
+        Some(_) => LogSilence::Silent,
+        None => LogSilence::Unknown,
+    }
+}
+
+/// "2 hours", "90 minutes".
+fn describe_duration(d: Duration) -> String {
+    let minutes = d.as_secs() / 60;
+    if minutes >= 60 && minutes.is_multiple_of(60) {
+        match minutes / 60 {
+            1 => "1 hour".to_string(),
+            hours => format!("{hours} hours"),
+        }
+    } else {
+        format!("{minutes} minutes")
+    }
+}
 
 /// Best-effort Slack ping for a run that looks stuck, independent of the
 /// terminal-state wake-up path (`chat::process_run_wakeups`) — a parked
@@ -1535,6 +1574,7 @@ async fn run_sge(
     // single Slack ping per silent episode, same shape as `Transport::Stalled`.
     let mut last_log_mtime: Option<std::time::SystemTime> = None;
     let mut last_log_change = tokio::time::Instant::now();
+    let mut last_silence_check: Option<tokio::time::Instant> = None;
     let mut silence_announced = false;
     let mut transport = Transport::Up;
     let mut acct: Option<tokio::task::JoinHandle<Result<Option<sge::AcctRecord>>>> = None;
@@ -1765,21 +1805,39 @@ async fn run_sge(
                 last_log_mtime = mtime;
                 last_log_change = tokio::time::Instant::now();
                 silence_announced = false;
-            } else if !silence_announced && last_log_change.elapsed() >= LOG_SILENCE_THRESHOLD {
-                notify_run_stalled(
-                    &store,
-                    &stored,
-                    &descriptor,
-                    &format!(
-                        "No new job output for over {} minutes, though Grid Engine still \
-                         reports it running. It may be hung.",
-                        LOG_SILENCE_THRESHOLD.as_secs() / 60
-                    ),
-                );
-                silence_announced = true;
+            } else if !silence_announced
+                && last_log_change.elapsed() >= LOG_SILENCE_THRESHOLD
+                && last_silence_check.is_none_or(|at| at.elapsed() >= LOG_SILENCE_RECHECK)
+            {
+                // The mirror only moves when a complete line arrives, so a job
+                // drawing a progress bar looks silent here while writing every
+                // second. The cluster's own log is the authority.
+                last_silence_check = Some(tokio::time::Instant::now());
+                let age = ssh::log_age(&sge::login(&host), &dir).await;
+                match judge_log_silence(age, LOG_SILENCE_THRESHOLD) {
+                    LogSilence::Active { quiet_for } => {
+                        let now = tokio::time::Instant::now();
+                        last_log_change = now.checked_sub(quiet_for).unwrap_or(now);
+                    }
+                    LogSilence::Silent => {
+                        notify_run_stalled(
+                            &store,
+                            &stored,
+                            &descriptor,
+                            &format!(
+                                "The job's log has not been written to for over {}, though Grid \
+                                 Engine still reports it running. It may be hung.",
+                                describe_duration(LOG_SILENCE_THRESHOLD)
+                            ),
+                        );
+                        silence_announced = true;
+                    }
+                    LogSilence::Unknown => {}
+                }
             }
         } else {
             last_log_mtime = None;
+            last_silence_check = None;
             silence_announced = false;
         }
 
@@ -2017,6 +2075,39 @@ async fn cancel_ray(address: &str, submission_id: &str, run_id: &str, cancel_sen
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_log_the_cluster_says_is_fresh_is_not_silent_whatever_the_mirror_shows() {
+        let threshold = Duration::from_secs(2 * 60 * 60);
+        // A progress bar rewriting one line: written a second ago.
+        assert_eq!(
+            judge_log_silence(Some(Duration::from_secs(1)), threshold),
+            LogSilence::Active {
+                quiet_for: Duration::from_secs(1)
+            }
+        );
+        assert_eq!(
+            judge_log_silence(Some(threshold), threshold),
+            LogSilence::Silent
+        );
+        assert_eq!(
+            judge_log_silence(Some(threshold * 3), threshold),
+            LogSilence::Silent
+        );
+        // No answer is never taken for silence.
+        assert_eq!(judge_log_silence(None, threshold), LogSilence::Unknown);
+    }
+
+    #[test]
+    fn silence_is_described_in_the_unit_it_reads_best_in() {
+        assert_eq!(describe_duration(Duration::from_secs(2 * 3600)), "2 hours");
+        assert_eq!(describe_duration(Duration::from_secs(3600)), "1 hour");
+        assert_eq!(
+            describe_duration(Duration::from_secs(90 * 60)),
+            "90 minutes"
+        );
+        assert_eq!(describe_duration(LOG_SILENCE_THRESHOLD), "2 hours");
+    }
+
     use super::*;
     use crate::store::StoredRun;
 
