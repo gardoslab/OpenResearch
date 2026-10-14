@@ -6,6 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import {
+  primaryWorktree,
   acquireAdvisoryLock,
   initializeDatabase,
   managedStateMatches,
@@ -131,4 +132,14 @@ test('supervisor identity includes its unguessable launch token', () => {
   assert.equal(supervisorCommandMatches(command, 'token-a', helper), true)
   assert.equal(supervisorCommandMatches(command, 'token-b', helper), false)
   assert.equal(supervisorCommandMatches(command, 'token-a', '/tmp/other-helper.mjs'), false)
+})
+
+test('primary worktree prefers main, else the first checked-out worktree', () => {
+  const primary = { worktree: '/repo', branch: 'refs/heads/dev' }
+  const feature = { worktree: '/repo-feature', branch: 'refs/heads/feature' }
+  const main = { worktree: '/repo-main', branch: 'refs/heads/main' }
+  assert.equal(primaryWorktree([primary, feature, main]), main)
+  assert.equal(primaryWorktree([primary, feature]), primary)
+  assert.equal(primaryWorktree([{ worktree: '/repo.git', bare: true }, feature]), feature)
+  assert.equal(primaryWorktree([]), undefined)
 })
