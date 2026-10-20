@@ -16,6 +16,7 @@ import {
 import { NewProjectForm } from "./NewProjectForm";
 import { Button } from "./ui";
 import { SlackGlobalSettings } from "./SettingsPage";
+import { GlobalInstructionsSettings } from "./InstructionsSettings";
 
 export function NewProjectDialog({
   onClose,
@@ -203,16 +204,18 @@ function DeleteProjectDialog({
   );
 }
 
-type HomeTab = "projects" | "slack";
+type HomeTab = "projects" | "slack" | "instructions";
 
 /** The tab in the URL hash, so a reload or a shared link lands on the same one. */
 function initialHomeTab(): HomeTab {
-  return window.location.hash === "#slack" ? "slack" : "projects";
+  if (window.location.hash === "#slack") return "slack";
+  return window.location.hash === "#instructions" ? "instructions" : "projects";
 }
 
 const HOME_TABS: { id: HomeTab; label: () => string }[] = [
   { id: "projects", label: m.projects_home_projects },
   { id: "slack", label: m.settings_page_slack },
+  { id: "instructions", label: m.instructions_title },
 ];
 
 function LiveDot() {
@@ -241,7 +244,7 @@ export function ProjectsHome({
   const [tab, setTab] = useState<HomeTab>(initialHomeTab);
   const selectTab = (next: HomeTab) => {
     setTab(next);
-    window.history.replaceState(window.history.state, "", next === "projects" ? window.location.pathname + window.location.search : "#slack");
+    window.history.replaceState(window.history.state, "", next === "projects" ? window.location.pathname + window.location.search : `#${next}`);
   };
   const activity = useQuery(listProjectActivityQuery());
   const activityByProject = Object.fromEntries((activity.data ?? []).map((summary) => [summary.projectId, summary]));
@@ -265,7 +268,7 @@ export function ProjectsHome({
     <div className="home flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges] bg-canvas">
       <div className="home-inner max-w-290 my-0 mx-auto pt-12 px-6 pb-16 [@media((max-width:_960px))]:pt-6 [@media((max-width:_960px))]:px-4">
         <div className="home-head flex items-center justify-between gap-3 mb-4.5 [&_h2]:m-0 [&_h2]:text-4xl [&_h2]:tracking-[-0.02em] [@media((max-width:_520px))]:items-start [@media((max-width:_520px))]:flex-col">
-          <h2>{tab === "slack" ? m.settings_page_slack() : m.projects_home_projects()}</h2>
+          <h2>{HOME_TABS.find((item) => item.id === tab)?.label()}</h2>
           {tab === "projects" && (
             <Button
               onClick={() => setModalOpen(true)}
@@ -291,6 +294,10 @@ export function ProjectsHome({
         {tab === "slack" ? (
           <div className="max-w-readable">
             <SlackGlobalSettings heading={false} />
+          </div>
+        ) : tab === "instructions" ? (
+          <div className="max-w-readable">
+            <GlobalInstructionsSettings />
           </div>
         ) : (
         <div className="home-list overflow-hidden rounded-lg border border-border bg-background">

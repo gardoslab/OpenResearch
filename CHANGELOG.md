@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.4]
+
+Standing instructions for agents. A new Instructions tab on the Projects page, next to Slack, holds rules every agent follows in every project, and each project's Settings has an Instructions section for rules that apply to that project alone (project rules win on conflict). That section mirrors the `AGENTS.md` at the project's root: it is created if missing, edits are written to the file, and changes made to the file show up in Settings. The file is left uncommitted for you to commit. They are added to each agent's startup prompt, so changes reach new chats and any agent that restarts.
+
+Until you save your own, the global instructions show a built-in default: keep prose `EXPERIMENT_PLAN.md` and `EXPERIMENT_LOG.md` files in the project's artifacts directory, report each substantial experiment in the log with what was run, example inputs and outputs, metrics and findings, and keep multi-job experiments out of the chat by answering a single finished job in a sentence or two with the detail in the log. "Restore default" brings it back.
+
+The message an agent receives when a run finishes now asks for one to three short sentences and no restating of earlier reports, instead of "a few sentences".
+
 ## [0.5.3]
 
 Per-project Slack settings now also apply to messages queued by a run supervisor that started before an update: the channel and the muted events are applied when the message is sent, so a project's override no longer depends on which version queued it. Restarting a run's supervisor (Resync on the run) still picks up everything else new.

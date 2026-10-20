@@ -159,6 +159,19 @@ export const getProjectSlackQuery = (projectId: string) => queryOptions({
   staleTime: 300_000,
 });
 
+export const getGlobalInstructionsQuery = () => queryOptions({
+  queryKey: workspaceKey("getGlobalInstructions"),
+  queryFn: ({ signal }) => api.getGlobalInstructions(signal),
+  staleTime: 300_000,
+});
+
+export const getProjectInstructionsQuery = (projectId: string) => queryOptions({
+  queryKey: workspaceKey("getProjectInstructions", projectId),
+  queryFn: ({ signal }) => api.getProjectInstructions(projectId, signal),
+  // The file can change outside the app, so refetch on every visit and focus.
+  staleTime: 0,
+});
+
 export const getHarnessSetupCommandsQuery = () => queryOptions({
   queryKey: workspaceKey("getHarnessSetupCommands"),
   queryFn: ({ signal }) => api.getHarnessSetupCommands(signal),

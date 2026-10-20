@@ -7769,9 +7769,10 @@ fn run_wakeup_text(run: &crate::store::StoredRun) -> Option<String> {
         format!(
             "[orx] Run `{}` finished with status **{}**. You can compare this result with other \
              project runs using `orx runs {}` and inspect this run's logs using `orx logs {}`. \
-             End your reply with a short, plain summary of what was run and what the result \
-             was, in a few sentences — no preamble, no fluff, no incidental detail. That \
-             closing summary is what gets posted to Slack.",
+             Reply in one to three short, plain sentences — what was run and what \
+             the result was; no preamble, no fluff, no incidental detail, and no restating \
+             what you already reported. Anything longer belongs in a document, not in the \
+             chat. That reply is what gets posted to Slack.",
             run.id, run.status, run.project_id, run.id
         )
     })
@@ -10177,18 +10178,14 @@ mod run_wakeup_tests {
             run_wakeup_text(&run("done")).as_deref(),
             Some(
                 "[orx] Run `run_x` finished with status **done**. You can compare this result \
-with other project runs using `orx runs p1` and inspect this run's logs using `orx logs run_x`. End your reply with a short, plain summary \
-of what was run and what the result was, in a few sentences — no preamble, no fluff, no \
-incidental detail. That closing summary is what gets posted to Slack."
+with other project runs using `orx runs p1` and inspect this run's logs using `orx logs run_x`. Reply in one to three short, plain sentences — what was run and what the result was; no preamble, no fluff, no incidental detail, and no restating what you already reported. Anything longer belongs in a document, not in the chat. That reply is what gets posted to Slack."
             )
         );
         assert_eq!(
             run_wakeup_text(&run("failed")).as_deref(),
             Some(
                 "[orx] Run `run_x` finished with status **failed**. You can compare this result \
-with other project runs using `orx runs p1` and inspect this run's logs using `orx logs run_x`. End your reply with a short, plain summary \
-of what was run and what the result was, in a few sentences — no preamble, no fluff, no \
-incidental detail. That closing summary is what gets posted to Slack."
+with other project runs using `orx runs p1` and inspect this run's logs using `orx logs run_x`. Reply in one to three short, plain sentences — what was run and what the result was; no preamble, no fluff, no incidental detail, and no restating what you already reported. Anything longer belongs in a document, not in the chat. That reply is what gets posted to Slack."
             )
         );
         assert!(run_wakeup_text(&run("cancelled")).is_none());

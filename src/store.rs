@@ -389,6 +389,12 @@ pub struct ProjectSlack {
     pub events: crate::telemetry::SlackEventSettings,
 }
 
+/// The `agent_instructions` scope for rules that apply to every project.
+pub const GLOBAL_INSTRUCTIONS_SCOPE: &str = "global";
+
+/// Longest standing instruction text accepted, per scope.
+pub const MAX_INSTRUCTIONS_CHARS: usize = 20_000;
+
 /// A bot-posted Slack message whose thread leads back to a chat session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlackThread {
@@ -727,6 +733,10 @@ impl Store {
                 channel_id       TEXT,
                 allowed_user_ids TEXT,
                 events_json      TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE IF NOT EXISTS agent_instructions (
+                scope TEXT PRIMARY KEY,
+                body  TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS slack_digests (
                 project_id  TEXT NOT NULL,
@@ -1784,6 +1794,37 @@ impl Store {
                 serde_json::to_string(&settings.events)?
             ],
         )?;
+        Ok(())
+    }
+
+    /// Saved standing instructions for `scope` (today only
+    /// [`GLOBAL_INSTRUCTIONS_SCOPE`]; a project's live in its `AGENTS.md`). `None` means nothing was ever saved, which for the global
+    /// scope is how the built-in default applies; a saved empty string means
+    /// the user cleared it on purpose.
+    pub fn instructions(&self, scope: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT body FROM agent_instructions WHERE scope = ?1",
+                params![scope],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Saves `body` for `scope`; `None` forgets it.
+    pub fn set_instructions(&self, scope: &str, body: Option<&str>) -> Result<()> {
+        match body {
+            Some(body) => self.conn.execute(
+                "INSERT INTO agent_instructions (scope, body) VALUES (?1, ?2)
+                 ON CONFLICT(scope) DO UPDATE SET body = excluded.body",
+                params![scope, body],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM agent_instructions WHERE scope = ?1",
+                params![scope],
+            )?,
+        };
         Ok(())
     }
 
@@ -4915,6 +4956,35 @@ mod tests {
             Some("m2")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn instructions_distinguish_never_saved_from_cleared() {
+        let dir = std::env::temp_dir().join(format!("orx-instructions-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert_eq!(store.instructions(GLOBAL_INSTRUCTIONS_SCOPE).unwrap(), None);
+
+        store
+            .set_instructions(GLOBAL_INSTRUCTIONS_SCOPE, Some(""))
+            .unwrap();
+        assert_eq!(
+            store
+                .instructions(GLOBAL_INSTRUCTIONS_SCOPE)
+                .unwrap()
+                .as_deref(),
+            Some("")
+        );
+        store.set_instructions("proj_1", Some("Be terse")).unwrap();
+        assert_eq!(
+            store.instructions("proj_1").unwrap().as_deref(),
+            Some("Be terse")
+        );
+
+        store
+            .set_instructions(GLOBAL_INSTRUCTIONS_SCOPE, None)
+            .unwrap();
+        assert_eq!(store.instructions(GLOBAL_INSTRUCTIONS_SCOPE).unwrap(), None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
