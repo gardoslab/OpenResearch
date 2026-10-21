@@ -108,10 +108,14 @@ const RUN_STALLED_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_
 fn slack_block_text(text: &str) -> String {
     const LIMIT: usize = 2900;
     if text.chars().count() <= LIMIT {
-        text.to_string()
-    } else {
-        text.chars().take(LIMIT).collect::<String>() + "\u{2026} (truncated)"
+        return text.to_string();
     }
+    let mut cut = text.chars().take(LIMIT).collect::<String>();
+    // A cut inside a code block would leave it open and swallow the rest.
+    if cut.matches("```").count() % 2 == 1 {
+        cut.push_str("\n```");
+    }
+    cut + "\u{2026} (truncated)"
 }
 
 /// Slack refuses a whole message whose `header` block is longer than this,
@@ -232,7 +236,10 @@ pub fn enqueue_job_submitted(
         ordinal,
         descriptor.job_label().as_deref(),
     );
-    let mut details = vec![format!("Command: `{}`", run.command)];
+    let mut details = vec![format!(
+        "Command: `{}`",
+        crate::slack_format::escape(&run.command)
+    )];
     if let Some(link) = deep_link(
         &project.id,
         &experiment.id,
@@ -285,7 +292,8 @@ pub fn enqueue_run_synthesized(
         details.push("The experiment's description changed during this turn.".to_string());
     }
     if let Some(text) = outcome_text {
-        details.push(text.to_string());
+        // The agent wrote Markdown; Slack needs mrkdwn.
+        details.push(crate::slack_format::from_markdown(text));
     }
     if let Some(link) = deep_link(
         &project.id,
@@ -394,11 +402,13 @@ pub fn enqueue_slack_reply(
     if crate::config::slack_app().poster().is_none() {
         return Ok(());
     }
+    // An agent's answer is Markdown; orx's own notices are plain sentences, which pass through.
+    let text = crate::slack_format::from_markdown(text);
     let payload = json!({
         "text": text,
         "blocks": [{
             "type": "section",
-            "text": { "type": "mrkdwn", "text": slack_block_text(text) },
+            "text": { "type": "mrkdwn", "text": slack_block_text(&text) },
         }],
         "channel": item.channel,
         "thread_ts": item.thread_ts,
@@ -601,7 +611,7 @@ mod tests {
                 &wakeup,
                 &project(),
                 &experiment(),
-                Some("All done."),
+                Some("**All done.** See [the log](https://x.test/l) & `a<b`"),
                 true,
             )
             .unwrap();
@@ -610,7 +620,10 @@ mod tests {
             assert_eq!(pending[0].kind, "run_synthesized");
             let payload: Value = serde_json::from_str(&pending[0].payload_json).unwrap();
             let text = payload["text"].as_str().unwrap();
-            assert!(text.contains("All done."));
+            assert!(
+                text.contains("*All done.* See <https://x.test/l|the log> &amp; `a&lt;b`"),
+                "{text}"
+            );
             assert!(text.contains("description changed"));
             drop(store);
             let _ = std::fs::remove_dir_all(dir);
@@ -772,6 +785,11 @@ mod tests {
         // Counted in characters, not bytes: 150 multi-byte characters fit.
         let wide = "\u{e9}".repeat(SLACK_HEADER_LIMIT);
         assert_eq!(payload(&wide, "d")["blocks"][0]["text"]["text"], wide);
+
+        // A cut that lands inside a code block closes it.
+        let table = format!("```\n{}", "row\n".repeat(1000));
+        let cut = slack_block_text(&table);
+        assert_eq!(cut.matches("```").count() % 2, 0, "{cut}");
     }
 
     #[test]
