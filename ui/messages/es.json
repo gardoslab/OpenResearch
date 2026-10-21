@@ -1328,5 +1328,12 @@
   "ssh_run_in": "Ejecutar en",
   "ssh_direct_host": "Servidor directamente",
   "ssh_existing_container": "Contenedor existente",
-  "ssh_container_reference": "Nombre o ID del contenedor"
+  "ssh_container_reference": "Nombre o ID del contenedor",
+  "instructions_title": "Instrucciones",
+  "instructions_global_description": "Reglas que todos los agentes siguen en todos los proyectos. Se añaden al prompt inicial de cada agente, así que los cambios llegan a los chats nuevos y a cualquier agente que se reinicie.",
+  "instructions_project_description": "Refleja el archivo AGENTS.md en la raíz de {project}: los cambios aquí se escriben en ese archivo y los cambios del archivo aparecen aquí. Va después de las instrucciones globales y prevalece si hay conflicto.",
+  "instructions_using_default": "Se muestra el valor predeterminado integrado. Edítalo para hacerlo tuyo.",
+  "instructions_restore_default": "Restaurar predeterminado",
+  "instructions_global_placeholder": "Reglas y pautas para todos los agentes, en todos los proyectos",
+  "instructions_project_placeholder": "Reglas y pautas solo para este proyecto"
 }

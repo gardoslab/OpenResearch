@@ -31,6 +31,7 @@ mod paths;
 mod plane;
 mod remote;
 mod slack_api;
+mod slack_format;
 mod slack_inbound;
 mod store;
 mod telemetry;

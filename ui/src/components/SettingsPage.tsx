@@ -1,4 +1,5 @@
 import { cn } from "./ui/cn";
+import { ProjectInstructionsSection } from "./InstructionsSettings";
 import { TARGET_LABELS } from "../computeTargets";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 import {
@@ -4690,6 +4691,11 @@ export function SettingsView({
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <TelemetryTab />
             </section>
+            {project && (
+              <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                <ProjectInstructionsSection project={project} />
+              </section>
+            )}
             {project && (
               <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
                 <ProjectSlackSection project={project} />
