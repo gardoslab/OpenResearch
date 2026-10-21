@@ -185,6 +185,7 @@
   "file_viewer_file_truncated_showing_the_first_512_kb": "Archivo truncado — se muestran los primeros 512 KB.",
   "file_viewer_html_partial": "La página se corta a mitad — no se pudo cargar el archivo completo.",
   "file_viewer_html_preview": "HTML renderizado: {name}",
+  "chat_widget_title": "Widget interactivo",
   "file_viewer_loading": "Cargando…",
   "file_viewer_open_in_default_editor": "Abrir en el editor predeterminado",
   "file_viewer_os_action_committed_version": "Copia confirmada de {branch}, no en disco",

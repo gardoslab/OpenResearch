@@ -158,6 +158,8 @@ import {
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { LitSourcesList } from "./LitSourcesPicker";
 import { ChatImageScope, Md } from "./Md";
+import { ChatWidgetSubmitContext } from "./ChatWidget";
+import { appendToDraft } from "../chatWidget";
 import { PlanStrip } from "./PlanStrip";
 import { SETTINGS_NAV, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
@@ -4528,6 +4530,12 @@ export function ChatPanel({
   const stickToBottom = useRef(true);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  /** A widget answers by filling the composer, not by sending: the user sees
+   * (and can edit) exactly what the agent will receive before it goes. */
+  const submitWidget = useCallback((text: string) => {
+    setDraft((current) => appendToDraft(current, text));
+    composerRef.current?.focus();
+  }, []);
   const [resumeOpen, setResumeOpen] = useState(false);
   const dataSources = usePopover();
   const addTranscriptSelection = useCallback((selection: Pick<SelectionAction, "text" | "range">) => {
@@ -6424,6 +6432,7 @@ export function ChatPanel({
           >
             <div className="chat-thread-inner max-w-readable my-0 mx-auto pt-4 px-4 pb-8 flex flex-col gap-4" ref={threadInnerRef}>
               <ChatImageScope projectId={projectId} sessionId={activeId}>
+               <ChatWidgetSubmitContext value={submitWidget}>
                 <Transcript
                   key={activeId}
                   scrollRef={threadRef}
@@ -6452,6 +6461,7 @@ export function ChatPanel({
                   sessionModel={activeSession?.model}
                   sessionBusy={lookupSessionBusy}
                 />
+               </ChatWidgetSubmitContext>
               </ChatImageScope>
               {busy && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>

@@ -185,6 +185,7 @@
   "file_viewer_file_truncated_showing_the_first_512_kb": "फ़ाइल छोटी की गई — पहले 512 KB दिखाए जा रहे हैं।",
   "file_viewer_html_partial": "नीचे का पेज बीच में रुक जाता है — पूरी फ़ाइल लोड नहीं हो सकी।",
   "file_viewer_html_preview": "रेंडर किया गया HTML: {name}",
+  "chat_widget_title": "इंटरैक्टिव विजेट",
   "file_viewer_loading": "लोड हो रहा है…",
   "file_viewer_open_in_default_editor": "डिफ़ॉल्ट एडिटर में खोलें",
   "file_viewer_os_action_committed_version": "{branch} की कमिट की गई कॉपी, डिस्क पर नहीं",

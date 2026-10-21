@@ -108,6 +108,7 @@ const CUSTOMIZE: &str = include_str!("../../agent-skills/orx-customize/SKILL.md"
 const PAPER: &str = include_str!("../../agent-skills/orx-paper/SKILL.md");
 const INSTANCES: &str = include_str!("../../agent-skills/orx-instances/SKILL.md");
 const FEEDBACK: &str = include_str!("../../agent-skills/orx-feedback/SKILL.md");
+const UI: &str = include_str!("../../agent-skills/orx-ui/SKILL.md");
 const FIGURES: &str = include_str!("../../agent-skills/orx-figures/SKILL.md");
 const FIGURES_RESOURCES: &[AgentSkillResource] = &[
     AgentSkillResource {
@@ -226,6 +227,13 @@ const S_INSTANCES: AgentSkill = AgentSkill {
     resources: &[],
 };
 
+const S_UI: AgentSkill = AgentSkill {
+    name: "orx-ui",
+    description: "Show an interactive widget in the chat and get the user's choice back: compare outputs from several models or configurations side by side, review images or videos, pick a winner, adjust a plot's parameters before publishing. Use when a decision is easier to make by looking and clicking than by reading text; not for static results, which belong in a report.",
+    content: UI,
+    resources: &[],
+};
+
 const S_FEEDBACK: AgentSkill = AgentSkill {
     name: "orx-feedback",
     description: "Report product feedback about OpenResearch itself with `orx feedback`. Use when the user expresses frustration with an OpenResearch feature or bug, says a feature would be nice to have, or you hit a meaningful limitation or bug in the orx CLI, the agent harness, or the app. Not for research results, the user's own code, or minor nits.",
@@ -249,6 +257,7 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_PAPER,
             &S_CUSTOMIZE,
             &S_LIT,
+            &S_UI,
             &S_FEEDBACK,
         ],
         SkillSet::Full => vec![
@@ -264,6 +273,7 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_PAPER,
             &S_CUSTOMIZE,
             &S_LIT,
+            &S_UI,
             &S_FEEDBACK,
         ],
     }

@@ -188,6 +188,7 @@
   "file_viewer_file_truncated_showing_the_first_512_kb": "فایل کوتاه شده است — فقط ۵۱۲ کیلوبایت نخست نمایش داده می‌شود.",
   "file_viewer_html_partial": "صفحهٔ زیر در میانه متوقف می‌شود — فایل کامل بارگیری نشد.",
   "file_viewer_html_preview": "HTML رندرشده: {name}",
+  "chat_widget_title": "ابزارک تعاملی",
   "file_viewer_loading": "در حال بارگیری…",
   "file_viewer_open_in_default_editor": "باز کردن در ویرایشگر پیش‌فرض",
   "file_viewer_os_action_committed_version": "نسخهٔ کامیت‌شده از {branch}، نه روی دیسک",

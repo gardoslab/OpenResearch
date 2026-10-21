@@ -26,6 +26,8 @@ import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { Button, IconButton, IconButtonLink } from "./ui";
 import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
 import { chatImageTarget, isWindowsDrivePath } from "../markdownTarget";
+import { WIDGET_FENCE } from "../chatWidget";
+import { ChatWidget } from "./ChatWidget";
 
 const ImageResolverContext = createContext<((src: string, fallback?: boolean) => string | null) | undefined>(undefined);
 
@@ -484,6 +486,14 @@ export const Md = memo(function Md({
       );
     },
     ...mdCodeComponents,
+    // After the shared renderers so it can fall back to them: a widget fence
+    // needs this component's image resolver to reach project media.
+    code: (props) => {
+      if (props.className === `language-${WIDGET_FENCE}`) {
+        return <ChatWidget html={String(props.children ?? "").replace(/\n$/, "")} resolveSrc={imageSrc ?? undefined} />;
+      }
+      return mdCodeComponents.code(props);
+    },
   }), [onOpenFile, onOpenRun, resolveFilePath, resolveImageSrc, chatImageSrc, imageSrc]);
 
   return (
