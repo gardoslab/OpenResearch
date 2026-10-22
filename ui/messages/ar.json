@@ -185,6 +185,7 @@
   "file_viewer_file_truncated_showing_the_first_512_kb": "تم اقتطاع الملف — عرض أول 512 كيلوبايت.",
   "file_viewer_html_partial": "عرض الصفحة أدناه غير مكتمل — تعذّر تحميل الملف كاملًا.",
   "file_viewer_html_preview": "HTML المعروض: {name}",
+  "chat_widget_title": "أداة تفاعلية",
   "file_viewer_loading": "جارٍ التحميل…",
   "file_viewer_open_in_default_editor": "فتح في المحرر الافتراضي",
   "file_viewer_os_action_committed_version": "نسخة مودعة من {branch}، ليست على القرص",

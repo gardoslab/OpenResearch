@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.5.5]
+
+Interactive widgets in chat. An agent can now put a small interactive page in its message (a fenced `orx-ui` block) to show outputs from several models or configurations side by side, review images or video, or let you adjust a plot's parameters. The page runs sandboxed, with no access to the dashboard or your files beyond the media the agent embeds (about 4 MB in total). Its buttons answer by filling the message box with your choice; nothing is sent until you press send. A new `orx-ui` skill teaches agents how to use it.
+
 ## [0.5.4]
 
 Standing instructions for agents. A new Instructions tab on the Projects page, next to Slack, holds rules every agent follows in every project, and each project's Settings has an Instructions section for rules that apply to that project alone (project rules win on conflict). That section mirrors the `AGENTS.md` at the project's root: it is created if missing, edits are written to the file, and changes made to the file show up in Settings. The file is left uncommitted for you to commit. They are added to each agent's startup prompt, so changes reach new chats and any agent that restarts.

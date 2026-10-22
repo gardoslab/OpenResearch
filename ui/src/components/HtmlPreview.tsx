@@ -80,7 +80,7 @@ async function inlineAssets(assets: Asset[], signal: AbortSignal) {
 /** The document as the frame should receive it. Resolves what it can reach —
  * the elements in `INLINABLE` only, so `srcset`, CSS `url()` and an inlined
  * stylesheet's own references stay unresolved — and defuses the rest. */
-async function assembleDocument(
+export async function assembleDocument(
   html: string,
   resolveSrc: (src: string) => string | null,
   signal: AbortSignal,
