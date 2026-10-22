@@ -134,10 +134,92 @@ struct ProjectState {
     experiments: usize,
     runs: usize,
     active_runs: usize,
+    /// The rendered standing-instructions section; empty when there are none.
+    instructions: String,
+}
+
+/// Rules every agent follows in every project, until the user edits or clears
+/// them in the Projects page's Instructions tab.
+const DEFAULT_GLOBAL_INSTRUCTIONS: &str = include_str!("../../GLOBAL_INSTRUCTIONS.md");
+
+pub fn default_global_instructions() -> &'static str {
+    DEFAULT_GLOBAL_INSTRUCTIONS.trim()
+}
+
+/// The global instructions in force: the saved text, or the built-in default
+/// when none was ever saved.
+pub fn effective_global_instructions(store: &store::Store) -> Result<String> {
+    Ok(store
+        .instructions(store::GLOBAL_INSTRUCTIONS_SCOPE)?
+        .unwrap_or_else(|| default_global_instructions().to_string()))
+}
+
+/// The file in the project's root that holds its instructions. Settings mirrors
+/// it, and it is plain markdown the user can also edit, commit, or share.
+pub const PROJECT_INSTRUCTIONS_FILE: &str = "AGENTS.md";
+
+fn project_instructions_path(project: &LocalProject) -> PathBuf {
+    Path::new(&project.repo_path).join(PROJECT_INSTRUCTIONS_FILE)
+}
+
+/// The project's `AGENTS.md`, or an empty string when it is missing or
+/// unreadable (an agent starting up must not fail over it).
+fn read_project_instructions(project: &LocalProject) -> String {
+    std::fs::read_to_string(project_instructions_path(project))
+        .map(|text| text.chars().take(store::MAX_INSTRUCTIONS_CHARS).collect())
+        .unwrap_or_default()
+}
+
+/// The project's `AGENTS.md` for the Settings editor, creating a starter file
+/// when the project has none yet.
+pub fn ensure_project_instructions(project: &LocalProject) -> Result<String> {
+    let path = project_instructions_path(project);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let starter = "# Agent instructions\n";
+            std::fs::write(&path, starter)
+                .map_err(|e| anyhow!("Could not create {}: {}", path.display(), e))?;
+            Ok(starter.to_string())
+        }
+        Err(e) => Err(anyhow!("Could not read {}: {}", path.display(), e)),
+    }
+}
+
+/// Writes `text` to the project's `AGENTS.md`. A symlink is written through, so
+/// a link to another instructions file keeps working.
+pub fn write_project_instructions(project: &LocalProject, text: &str) -> Result<()> {
+    let path = project_instructions_path(project);
+    let mut body = text.trim_end().to_string();
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    std::fs::write(&path, body).map_err(|e| anyhow!("Could not write {}: {}", path.display(), e))
+}
+
+/// The prompt section for the user's standing instructions, or an empty string
+/// when there are none. Project text comes second and wins on conflict.
+fn instructions_md(global: &str, project: &str) -> String {
+    let (global, project) = (global.trim(), project.trim());
+    if global.is_empty() && project.is_empty() {
+        return String::new();
+    }
+    let mut md = String::from(
+        "## Standing instructions\n\nThe user wrote these rules; follow them on top of everything \
+         above. If a project instruction conflicts with a global one, the project instruction wins.\n\n",
+    );
+    if !global.is_empty() {
+        md.push_str(&format!("### For every project\n\n{global}\n\n"));
+    }
+    if !project.is_empty() {
+        md.push_str(&format!("### For this project\n\n{project}\n\n"));
+    }
+    md
 }
 
 impl ProjectState {
-    fn load(project_id: &str) -> Result<Self> {
+    fn load(project: &LocalProject) -> Result<Self> {
+        let project_id = project.id.as_str();
         let store = store::Store::open()?;
         let experiments = store.list_experiments_by_project(project_id)?.len();
         let runs = store.list_runs_by_project(project_id)?;
@@ -145,10 +227,15 @@ impl ProjectState {
             .iter()
             .filter(|run| matches!(run.status.as_str(), "starting" | "running"))
             .count();
+        let instructions = instructions_md(
+            &effective_global_instructions(&store)?,
+            &read_project_instructions(project),
+        );
         Ok(Self {
             experiments,
             runs: runs.len(),
             active_runs,
+            instructions,
         })
     }
 }
@@ -255,6 +342,8 @@ fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
         .replace("{artifacts}", &artifacts)
         .replace("{project_state}", &project_state)
         .replace("{skill_names}", &skill_names)
+        // Last, so braces in the user's own text are never read as tokens.
+        .replace("{instructions}", &state.instructions)
 }
 
 /// Keep the files we drop into the checkout out of `git status` / accidental
@@ -322,7 +411,7 @@ pub fn ensure_playbook(
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
     }
-    let project_state = ProjectState::load(&project.id)?;
+    let project_state = ProjectState::load(project)?;
     std::fs::write(&playbook, playbook_md(project, &project_state))
         .map_err(|e| anyhow!("Could not write {}: {}", playbook.display(), e))?;
     // Modular skills, written fresh beside the playbook (same freshness
@@ -848,6 +937,61 @@ mod tests {
     }
 
     #[test]
+    fn standing_instructions_render_only_when_present_and_are_not_reparsed() {
+        assert_eq!(instructions_md("  ", "\n"), "");
+        let md = instructions_md("Global rule", "");
+        assert!(md.contains("### For every project\n\nGlobal rule"));
+        assert!(!md.contains("For this project"));
+        let md = instructions_md("Global rule", "Project rule with {name}");
+        assert!(md.find("Global rule") < md.find("Project rule"));
+
+        let state = ProjectState {
+            instructions: instructions_md("", "Use the {name} word"),
+            ..ProjectState::default()
+        };
+        let playbook = playbook_md(&sample_project(), &state);
+        assert!(playbook.contains("Use the {name} word"));
+        assert!(playbook.find("Use the {name} word") < playbook.find("## Skills"));
+        assert!(!playbook_md(&sample_project(), &ProjectState::default()).contains("Standing"));
+    }
+
+    #[test]
+    fn project_instructions_mirror_agents_md_and_create_it_when_missing() {
+        let dir = std::env::temp_dir().join(format!("orx-agents-md-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut project = sample_project();
+        project.repo_path = dir.to_string_lossy().into_owned();
+
+        assert_eq!(read_project_instructions(&project), "");
+        let starter = ensure_project_instructions(&project).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("AGENTS.md")).unwrap(),
+            starter
+        );
+
+        write_project_instructions(&project, "Prefer small PRs.  \n\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("AGENTS.md")).unwrap(),
+            "Prefer small PRs.\n"
+        );
+        // Edits made to the file directly are what Settings and the prompt see.
+        std::fs::write(dir.join("AGENTS.md"), "Edited by hand\n").unwrap();
+        assert_eq!(
+            ensure_project_instructions(&project).unwrap(),
+            "Edited by hand\n"
+        );
+        assert_eq!(read_project_instructions(&project), "Edited by hand\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn built_in_global_instructions_cover_the_experiment_files() {
+        let text = default_global_instructions();
+        assert!(text.contains("EXPERIMENT_PLAN.md") && text.contains("EXPERIMENT_LOG.md"));
+        assert!(!text.contains('{'), "braces would read as tokens");
+    }
+
+    #[test]
     fn playbook_keeps_runtime_facts_and_delegates_procedures() {
         let mut project = sample_project();
         project.github_owner.clear();
@@ -894,6 +1038,7 @@ mod tests {
             experiments: 12,
             runs: 18,
             active_runs: 1,
+            ..ProjectState::default()
         };
         let md = playbook_md(&project, &state);
         assert!(md.contains("**12 experiments**"));

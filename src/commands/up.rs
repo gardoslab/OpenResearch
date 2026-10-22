@@ -495,6 +495,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/projects/{id}/slack",
             get(project_slack_settings).post(set_project_slack_settings),
         )
+        .route(
+            "/api/projects/{id}/instructions",
+            get(project_instructions).post(set_project_instructions),
+        )
         .route("/api/projects/{id}/git", get(project_git_status))
         .route(
             "/api/projects/{id}/starter-prompts",
@@ -690,6 +694,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(slack_settings)
                 .post(set_slack_webhook)
                 .delete(delete_slack_webhook),
+        )
+        .route(
+            "/api/settings/instructions",
+            get(global_instructions).post(set_global_instructions),
         )
         .route("/api/settings/slack/events", post(set_slack_events))
         .route("/api/settings/slack/app", post(set_slack_app))
@@ -5764,6 +5772,83 @@ async fn set_project_slack_settings(
             .ok_or_else(|| not_found("project"))?;
         store.set_project_slack(&id, &settings)?;
         Ok(Json(json!(settings)))
+    })
+    .await
+}
+
+// --- standing instructions ------------------------------------------------------
+
+#[derive(Deserialize)]
+struct SetInstructionsReq {
+    /// The new text. For the global scope, `null` restores the built-in default;
+    /// an empty string clears the instructions on purpose.
+    text: Option<String>,
+}
+
+fn global_instructions_json(store: &Store) -> Result<Value> {
+    let saved = store.instructions(crate::store::GLOBAL_INSTRUCTIONS_SCOPE)?;
+    let default_text = crate::local::opencode::default_global_instructions();
+    Ok(json!({
+        "text": saved.clone().unwrap_or_else(|| default_text.to_string()),
+        "isDefault": saved.is_none(),
+        "defaultText": default_text,
+    }))
+}
+
+fn checked_instructions(text: String) -> std::result::Result<String, String> {
+    if text.chars().count() > crate::store::MAX_INSTRUCTIONS_CHARS {
+        return Err(format!(
+            "Instructions are limited to {} characters.",
+            crate::store::MAX_INSTRUCTIONS_CHARS
+        ));
+    }
+    Ok(text)
+}
+
+async fn global_instructions() -> ApiResult {
+    blocking_api(move || Ok(Json(global_instructions_json(&Store::open()?)?))).await
+}
+
+async fn set_global_instructions(Json(req): Json<SetInstructionsReq>) -> ApiResult {
+    blocking_api(move || {
+        let text = req
+            .text
+            .map(checked_instructions)
+            .transpose()
+            .map_err(|e| bad_request(&e))?;
+        let store = Store::open()?;
+        store.set_instructions(crate::store::GLOBAL_INSTRUCTIONS_SCOPE, text.as_deref())?;
+        Ok(Json(global_instructions_json(&store)?))
+    })
+    .await
+}
+
+/// The project's `AGENTS.md`, created with a starter heading if it has none.
+async fn project_instructions(Path(id): Path<String>) -> ApiResult {
+    blocking_api(move || {
+        let project = Store::open()?
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        let text = local::opencode::ensure_project_instructions(&project)?;
+        Ok(Json(json!({ "text": text })))
+    })
+    .await
+}
+
+async fn set_project_instructions(
+    Path(id): Path<String>,
+    Json(req): Json<SetInstructionsReq>,
+) -> ApiResult {
+    blocking_api(move || {
+        let text =
+            checked_instructions(req.text.unwrap_or_default()).map_err(|e| bad_request(&e))?;
+        let project = Store::open()?
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        local::opencode::write_project_instructions(&project, &text)?;
+        Ok(Json(
+            json!({ "text": local::opencode::ensure_project_instructions(&project)? }),
+        ))
     })
     .await
 }

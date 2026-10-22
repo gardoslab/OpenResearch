@@ -1329,5 +1329,12 @@
   "ssh_run_in": "यहाँ चलाएँ",
   "ssh_direct_host": "सीधे होस्ट पर",
   "ssh_existing_container": "मौजूदा कंटेनर",
-  "ssh_container_reference": "कंटेनर का नाम या ID"
+  "ssh_container_reference": "कंटेनर का नाम या ID",
+  "instructions_title": "निर्देश",
+  "instructions_global_description": "वे नियम जिनका पालन हर प्रोजेक्ट में हर एजेंट करता है। ये हर एजेंट के स्टार्टअप प्रॉम्प्ट में जोड़े जाते हैं, इसलिए बदलाव नई चैट और दोबारा शुरू होने वाले किसी भी एजेंट तक पहुँचते हैं।",
+  "instructions_project_description": "यह {project} की रूट में मौजूद AGENTS.md फ़ाइल का प्रतिबिंब है: यहाँ के बदलाव उस फ़ाइल में लिखे जाते हैं और फ़ाइल के बदलाव यहाँ दिखते हैं। यह वैश्विक निर्देशों के बाद आता है और टकराव होने पर इसी को प्राथमिकता मिलती है।",
+  "instructions_using_default": "अंतर्निहित डिफ़ॉल्ट दिखाया जा रहा है। इसे अपना बनाने के लिए संपादित करें।",
+  "instructions_restore_default": "डिफ़ॉल्ट बहाल करें",
+  "instructions_global_placeholder": "हर प्रोजेक्ट में हर एजेंट के लिए नियम और दिशानिर्देश",
+  "instructions_project_placeholder": "केवल इस प्रोजेक्ट के लिए नियम और दिशानिर्देश"
 }

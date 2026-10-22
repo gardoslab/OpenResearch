@@ -1329,5 +1329,12 @@
   "ssh_run_in": "التشغيل في",
   "ssh_direct_host": "المضيف مباشرة",
   "ssh_existing_container": "حاوية موجودة",
-  "ssh_container_reference": "اسم الحاوية أو معرّفها"
+  "ssh_container_reference": "اسم الحاوية أو معرّفها",
+  "instructions_title": "التعليمات",
+  "instructions_global_description": "قواعد يتبعها كل وكيل في كل مشروع. تُضاف إلى موجّه بدء كل وكيل، لذا تصل التغييرات إلى المحادثات الجديدة وأي وكيل يُعاد تشغيله.",
+  "instructions_project_description": "يعكس ملف AGENTS.md في جذر {project}: تُكتب التعديلات هنا في ذلك الملف، وتظهر هنا التعديلات التي تُجرى على الملف. يأتي بعد التعليمات العامة ويتقدّم عليها عند التعارض.",
+  "instructions_using_default": "يُعرض الإعداد الافتراضي المدمج. عدّله ليصبح خاصًا بك.",
+  "instructions_restore_default": "استعادة الافتراضي",
+  "instructions_global_placeholder": "قواعد وإرشادات لكل وكيل في كل مشروع",
+  "instructions_project_placeholder": "قواعد وإرشادات لهذا المشروع فقط"
 }

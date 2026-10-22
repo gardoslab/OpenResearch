@@ -1329,5 +1329,12 @@
   "ssh_run_in": "运行位置",
   "ssh_direct_host": "直接在主机上",
   "ssh_existing_container": "现有容器",
-  "ssh_container_reference": "容器名称或 ID"
+  "ssh_container_reference": "容器名称或 ID",
+  "instructions_title": "指令",
+  "instructions_global_description": "所有项目中的每个智能体都要遵循的规则。它们会被加入每个智能体的启动提示词，因此修改会作用于新对话和重新启动的智能体。",
+  "instructions_project_description": "与 {project} 根目录下的 AGENTS.md 文件保持镜像：在此处的修改会写入该文件，对文件的修改也会显示在此处。排在全局指令之后，两者冲突时以它为准。",
+  "instructions_using_default": "当前显示的是内置默认值。编辑后即可成为你自己的版本。",
+  "instructions_restore_default": "恢复默认",
+  "instructions_global_placeholder": "适用于所有项目中每个智能体的规则和准则",
+  "instructions_project_placeholder": "仅适用于此项目的规则和准则"
 }

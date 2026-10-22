@@ -1677,6 +1677,30 @@ export const getProjectSlack = (projectId: string, signal?: AbortSignal) =>
 export const setProjectSlack = (projectId: string, settings: ProjectSlack) =>
   post<ProjectSlack>(`/api/projects/${projectId}/slack`, settings);
 
+/** The rules every agent follows in every project. `isDefault` is true until the user saves their own text. */
+export interface GlobalInstructions {
+  text: string;
+  isDefault: boolean;
+  defaultText: string;
+}
+
+/** `null` restores the built-in default; an empty string clears the instructions. */
+export const getGlobalInstructions = (signal?: AbortSignal) =>
+  get<GlobalInstructions>("/api/settings/instructions", signal);
+
+export const setGlobalInstructions = (text: string | null) =>
+  post<GlobalInstructions>("/api/settings/instructions", { text });
+
+export interface ProjectInstructions {
+  text: string;
+}
+
+export const getProjectInstructions = (projectId: string, signal?: AbortSignal) =>
+  get<ProjectInstructions>(`/api/projects/${projectId}/instructions`, signal);
+
+export const setProjectInstructions = (projectId: string, text: string) =>
+  post<ProjectInstructions>(`/api/projects/${projectId}/instructions`, { text });
+
 export interface SlackDigestReport {
   sent: number;
   skipped: number;

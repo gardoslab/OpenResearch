@@ -1329,5 +1329,12 @@
   "ssh_run_in": "اجرا در",
   "ssh_direct_host": "مستقیماً روی میزبان",
   "ssh_existing_container": "کانتینر موجود",
-  "ssh_container_reference": "نام یا شناسهٔ کانتینر"
+  "ssh_container_reference": "نام یا شناسهٔ کانتینر",
+  "instructions_title": "دستورالعمل‌ها",
+  "instructions_global_description": "قواعدی که هر عامل در هر پروژه از آن‌ها پیروی می‌کند. این قواعد به پرامپت راه‌اندازی هر عامل افزوده می‌شوند، پس تغییرات به گفت‌وگوهای تازه و هر عاملی که دوباره راه‌اندازی شود می‌رسد.",
+  "instructions_project_description": "بازتاب فایل AGENTS.md در ریشهٔ {project}: ویرایش‌های اینجا در آن فایل نوشته می‌شود و ویرایش‌های فایل اینجا دیده می‌شود. بعد از دستورالعمل‌های سراسری می‌آید و در صورت تعارض مقدم است.",
+  "instructions_using_default": "پیش‌فرض داخلی نمایش داده می‌شود. برای شخصی‌سازی آن را ویرایش کنید.",
+  "instructions_restore_default": "بازگرداندن پیش‌فرض",
+  "instructions_global_placeholder": "قواعد و رهنمودها برای هر عامل در هر پروژه",
+  "instructions_project_placeholder": "قواعد و رهنمودها فقط برای این پروژه"
 }

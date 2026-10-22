@@ -134,7 +134,7 @@ When asked to report on findings from experiments and runs, explain things simpl
 
 Experiments often break, and workflows can be brittle. When you discover a durable lesson, save or update it as a custom skill with orx skills add (see `orx-customize`) rather than editing an orx-* file directly — built-in skill files are regenerated every turn and edits to them won't persist. Tell the user what you're saving and why before running it. Do not promise an immediate skill reload in the running harness to the user, though.
 
-## Skills
+{instructions}## Skills
 
 Available native OpenResearch skills:
 

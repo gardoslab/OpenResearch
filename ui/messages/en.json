@@ -1329,5 +1329,12 @@
   "ssh_run_in": "Run in",
   "ssh_direct_host": "Direct host",
   "ssh_existing_container": "Existing container",
-  "ssh_container_reference": "Container name or ID"
+  "ssh_container_reference": "Container name or ID",
+  "instructions_title": "Instructions",
+  "instructions_global_description": "Rules every agent follows in every project. They are added to each agent's startup prompt, so changes reach new chats and any agent that restarts.",
+  "instructions_project_description": "Mirrors the AGENTS.md file at the root of {project}: edits here are written to that file, and edits to the file show up here. Added after the global instructions; wins if the two disagree.",
+  "instructions_using_default": "Showing the built-in default. Edit it to make it yours.",
+  "instructions_restore_default": "Restore default",
+  "instructions_global_placeholder": "Rules and guidelines for every agent, in every project",
+  "instructions_project_placeholder": "Rules and guidelines for this project only"
 }
