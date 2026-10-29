@@ -188,6 +188,7 @@
   "file_viewer_file_truncated_showing_the_first_512_kb": "文件已截断——仅显示前 512 KB。",
   "file_viewer_html_partial": "下方页面在中途结束——无法加载完整文件。",
   "file_viewer_html_preview": "已渲染的 HTML：{name}",
+  "chat_widget_title": "交互式小组件",
   "file_viewer_loading": "正在加载…",
   "file_viewer_open_in_default_editor": "在默认编辑器中打开",
   "file_viewer_os_action_committed_version": "{branch} 上已提交的副本，不在磁盘上",

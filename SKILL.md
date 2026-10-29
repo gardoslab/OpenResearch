@@ -142,6 +142,7 @@ list, with one-line descriptions, is printed at the end of `orx skill` output):
 - **orx-evidence** — capture and inspect experiment results through run logs.
 - **orx-reports** — write durable research outputs into the project's artifacts directory.
 - **orx-figures** — publication-quality figures in matplotlib or TikZ. Load it **before** writing any plotting code, then read the one reference for that figure type.
+- **orx-ui** — show an interactive widget in the chat (compare outputs, review media, pick a winner) and receive the user's choice.
 - **orx-customize** — add reusable skills and LaTeX templates across projects.
 - **orx-paper** — draft a paper or preprint as LaTeX that renders and compiles to PDF.
 - **orx-feedback** — report meaningful OpenResearch bugs, feature requests, and user frustration without leaking research details.
